@@ -17,7 +17,7 @@ cp -r "$REPO_DIR/web" "$DEPLOY_DIR/web"
 cp "$REPO_DIR/server.js" "$REPO_DIR/package.json" "$DEPLOY_DIR/"
 [ -f "$REPO_DIR/package-lock.json" ] && cp "$REPO_DIR/package-lock.json" "$DEPLOY_DIR/"
 mkdir -p "$DEPLOY_DIR/scripts/cloud"
-cp "$REPO_DIR"/scripts/cloud/*.sh "$DEPLOY_DIR/scripts/cloud/"
+cp "$REPO_DIR"/scripts/cloud/*.sh "$REPO_DIR"/scripts/cloud/*.js "$DEPLOY_DIR/scripts/cloud/" 2>/dev/null || cp "$REPO_DIR"/scripts/cloud/*.sh "$DEPLOY_DIR/scripts/cloud/"
 
 cd "$DEPLOY_DIR"
 if [ ! -d node_modules ]; then
@@ -55,6 +55,16 @@ if ! command -v pm2 >/dev/null 2>&1; then
 fi
 pm2 delete clusscloud >/dev/null 2>&1 || true
 pm2 start server.js --name clusscloud --time --max-memory-restart 400M >/dev/null
+
+# 每小时本地数据快照（防库损坏；外备由 deploy.sh --pull-backup 承担）
+pm2 delete clusscloud-snap >/dev/null 2>&1 || true
+pm2 start "$DEPLOY_DIR/scripts/cloud/backup-data.sh" --name clusscloud-snap --cron "0 * * * *" --no-autorestart >/dev/null 2>&1 || true
+
+# 每日巡检（凭据就位才注册；见 scripts/cloud/daily-check.js 头注释）
+pm2 delete clusscloud-check >/dev/null 2>&1 || true
+if [ -f /root/.clusscloud-check.json ] && [ -x "$(command -v node)" ]; then
+  pm2 start "$DEPLOY_DIR/scripts/cloud/daily-check.js" --name clusscloud-check --cron "30 9 * * *" --no-autorestart >/dev/null 2>&1 || true
+fi
 pm2 save >/dev/null
 pm2 logs clusscloud --lines 5 --nostream || true
 echo "[bootstrap] 完成。健康检查：curl -s http://127.0.0.1:$CLOUD_PORT/api/health"
