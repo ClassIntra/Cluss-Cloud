@@ -502,6 +502,7 @@ app.get('/api/my/overview', requireWeb, requireOrgAdmin, function(req, res) {
   var monthStart = new Date();
   monthStart.setUTCDate(1); monthStart.setUTCHours(0, 0, 0, 0);
   var monthIso = monthStart.toISOString().replace('T', ' ').slice(0, 19);
+  var dayIso = nowIso().slice(0, 10) + ' 00:00:00';
 
   var totals = db.prepare([
     'SELECT',
@@ -509,8 +510,9 @@ app.get('/api/my/overview', requireWeb, requireOrgAdmin, function(req, res) {
     '  (SELECT IFNULL(SUM(allocated_micro),0) FROM allocations WHERE org_id = ?) AS allocated_micro,',
     '  (SELECT IFNULL(SUM(cost_micro),0) FROM usage_log WHERE org_id = ?) AS used_micro,',
     '  (SELECT COUNT(*) FROM usage_log WHERE org_id = ?) AS calls,',
-    '  (SELECT IFNULL(SUM(cost_micro),0) FROM usage_log WHERE org_id = ? AND created_at >= ?) AS month_cost_micro'
-  ].join('\n')).get(orgId, orgId, orgId, orgId, orgId, monthIso);
+    '  (SELECT IFNULL(SUM(cost_micro),0) FROM usage_log WHERE org_id = ? AND created_at >= ?) AS month_cost_micro,',
+    '  (SELECT IFNULL(SUM(cost_micro),0) FROM usage_log WHERE org_id = ? AND created_at >= ?) AS today_cost_micro'
+  ].join('\n')).get(orgId, orgId, orgId, orgId, orgId, monthIso, orgId, dayIso);
 
   res.json({
     code: 200, message: 'ok',

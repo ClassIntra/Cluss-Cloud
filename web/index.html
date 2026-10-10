@@ -228,6 +228,13 @@ function viewGuest() {
       '</section>';
   } else {
     html +=
+      '<section class="card">' +
+        '<div class="card-head"><h2>什么会上云，什么永远不会</h2></div>' +
+        '<div class="two-col" style="margin-bottom:0">' +
+          '<div><b class="ok-text">✓ 只上计量数据</b><div class="tiny muted" style="margin-top:4px">学号、模型、token 数、费用、场景、时间、班级标识——对账本来就需要这些，看板也只看这些。</div></div>' +
+          '<div><b class="danger-text">✗ 永不上云</b><div class="tiny muted" style="margin-top:4px">聊天与对话内容、云盘文件、学生密码——内容留在本班电脑，没有通道，也不应该有。</div></div>' +
+        '</div>' +
+      '</section>' +
       '<div class="two-col">' +
         '<section class="card">' +
           '<div class="card-head"><h2>注册学校</h2><span class="badge">免费 · 即时生效</span></div>' +
@@ -318,7 +325,7 @@ function viewDash() {
     '<div class="stat-row">' +
       stat(t.students, '已分配学生') + stat('¥' + yuan(t.allocated_micro), '累计分配') +
       stat('¥' + yuan(t.used_micro), '累计消耗') + stat('¥' + yuan(t.month_cost_micro), '本月消耗') +
-      stat(t.calls, '调用次数') +
+      stat('¥' + yuan(t.today_cost_micro), '今日消耗') + stat(t.calls, '调用次数') +
     '</div>';
 
   html += '<div class="seg" role="tablist">' +
@@ -415,9 +422,12 @@ function bindDash() {
       e.preventDefault();
       var fd = new FormData(ft);
       var msg = document.getElementById('topup-msg');
+      var amt = Number(fd.get('amount_yuan'));
+      // 大额二次确认：手滑多打个零是真实事故，不是想象
+      if (amt >= 100 && !window.confirm('单笔充值 ' + amt + ' 元金额较大，确认无误？（学号 ' + fd.get('user_id') + '）')) return;
       api('POST', '/my/topup', {
         user_id: fd.get('user_id'),
-        amount_yuan: Number(fd.get('amount_yuan')),
+        amount_yuan: amt,
         weekly_quota_yuan: fd.get('weekly_quota_yuan') === '' ? undefined : Number(fd.get('weekly_quota_yuan'))
       }).then(function(d) {
         msg.innerHTML = '<div class="alert alert-success">' + esc(d.message || '已充值') + '</div>';
@@ -478,12 +488,14 @@ function viewPlatform() {
           (o.status === 'active' ? '停用' : '启用') + '</button></td></tr>';
     }).join('') + '</tbody></table></div></section>';
 
-  html += '<section class="card"><div class="card-head"><h2>接入节点</h2><span class="tiny muted">全网 ' + d.nodes.length + ' 个</span></div><div class="table-scroll"><table>' +
-    '<thead><tr><th>实例</th><th>学校</th><th>备注</th><th>状态</th><th>版本</th><th>最后上报</th></tr></thead><tbody>' +
+      var curModelV = plat.mcVersion;
+      html += '<section class="card"><div class="card-head"><h2>接入节点</h2><span class="tiny muted">全网 ' + d.nodes.length + ' 个 · 当前策略 v' + curModelV + '</span></div><div class="table-scroll"><table>' +
+    '<thead><tr><th>实例</th><th>学校</th><th>备注</th><th>状态</th><th>策略版本</th><th>最后上报</th></tr></thead><tbody>' +
     d.nodes.map(function(n) {
+      var behind = curModelV > 0 && n.status === 'active' && n.last_model_version < curModelV;
       return '<tr><td class="mono">' + esc(n.instance_id) + '</td><td>' + esc(n.org_name || n.org_id) + '</td><td class="muted">' + esc(n.label || '—') + '</td>' +
         '<td>' + (n.status === 'revoked' ? '<span class="badge badge-danger">吊销</span>' : (n.online ? '<span class="badge badge-ok">在线</span>' : '<span class="badge badge-warn">失联</span>')) + '</td>' +
-        '<td class="mono tiny">' + esc(n.node_version || '?') + '</td>' +
+        '<td>' + (behind ? '<span class="badge badge-warn">v' + n.last_model_version + ' 落后</span>' : '<span class="badge badge-ok">v' + n.last_model_version + '</span>') + '</td>' +
         '<td class="muted tiny">' + (n.last_report_at ? relTime(n.last_report_at) : '从未') + '</td></tr>';
     }).join('') + '</tbody></table></div></section>';
 
