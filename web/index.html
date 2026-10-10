@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClussCloud · 多班同步管理公共服务</title>
+<style>
+/* 独立小页面：自带全部样式，不依赖任何外部资源；深浅色跟随系统 */
+:root {
+  --bg: #eef1f8; --card: rgba(255,255,255,.72); --card-border: rgba(255,255,255,.75);
+  --text: #1c1d21; --text2: #5a6273;
+  --accent: #2f6bdd; --accent-soft: #e8effc; --accent-hover: #2457bb;
+  --ok: #1f9d63; --ok-soft: #e6f5ec; --warn: #c47e12; --warn-soft: #fdf3e0;
+  --danger: #d64545; --danger-soft: #fdecec;
+  --r-lg: 20px; --r-md: 14px; --r-pill: 999px;
+  --shadow: 0 10px 30px rgba(31,41,72,.08);
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #171923; --card: rgba(38,42,58,.72); --card-border: rgba(255,255,255,.08);
+    --text: #e8eaf2; --text2: #9aa3b5;
+    --accent: #6b9bff; --accent-soft: rgba(107,155,255,.16); --accent-hover: #8ab0ff;
+    --ok: #4ecb8d; --ok-soft: rgba(78,203,141,.14); --warn: #e0a63c; --warn-soft: rgba(224,166,60,.14);
+    --danger: #ef6b6b; --danger-soft: rgba(239,107,107,.14);
+    --shadow: 0 10px 30px rgba(0,0,0,.35);
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; min-height: 100vh; color: var(--text);
+  background: linear-gradient(135deg, #e8ecf7 0%, #f3eefb 45%, #eaf0fb 100%);
+  font: 15px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  body { background: linear-gradient(135deg, #141722 0%, #1b1830 50%, #131b2e 100%); }
+}
+.wrap { max-width: 980px; margin: 0 auto; padding: 24px; display: flex; flex-direction: column; gap: 20px; }
+h1 { font-size: 1.45rem; margin: 0; }
+h2 { font-size: 1.08rem; margin: 0; }
+.muted { color: var(--text2); } .tiny { font-size: .8rem; }
+.mono { font-family: var(--mono); }
+.center { text-align: center; }
+.card {
+  background: var(--card); border: 1px solid var(--card-border);
+  border-radius: var(--r-lg); padding: 22px; box-shadow: var(--shadow);
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+}
+.card-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.hero-sub { color: var(--text2); margin: 4px 0 0; max-width: 640px; }
+.steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit,minmax(200px,1fr)); gap: 14px; }
+.step-card { background: var(--card); border: 1px solid var(--card-border); border-radius: var(--r-md); padding: 16px; }
+.step-num { display: inline-flex; width: 26px; height: 26px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); align-items: center; justify-content: center; font-weight: 600; margin-bottom: 8px; }
+.two-col { display: grid; grid-template-columns: 1.2fr 1fr; gap: 20px; align-items: start; }
+@media (max-width: 760px) { .two-col { grid-template-columns: 1fr; } }
+.field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 14px; }
+.field-label { font-size: .8rem; color: var(--text2); }
+.field-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 480px) { .field-pair { grid-template-columns: 1fr; } }
+.input, textarea.input {
+  width: 100%; padding: 10px 12px; border-radius: var(--r-md); font-size: .95rem;
+  border: 1px solid var(--card-border); background: var(--card); color: var(--text); outline: none;
+}
+.input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+textarea.input { font-family: var(--mono); font-size: .82rem; min-height: 260px; resize: vertical; }
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 10px 18px; border-radius: var(--r-md); border: none; cursor: pointer;
+  font-size: .92rem; color: #fff; background: var(--accent); transition: background .15s;
+}
+.btn:hover { background: var(--accent-hover); }
+.btn:disabled { opacity: .55; cursor: default; }
+.btn-ghost { background: transparent; color: var(--text); border: 1px solid var(--card-border); }
+.btn-ghost:hover { background: var(--accent-soft); }
+.btn-sm { padding: 5px 12px; font-size: .82rem; border-radius: 10px; }
+.btn-block { width: 100%; }
+.btn-danger { color: var(--danger); }
+.badge { font-size: .74rem; padding: 2px 10px; border-radius: var(--r-pill); background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
+.badge-ok { background: var(--ok-soft); color: var(--ok); }
+.badge-warn { background: var(--warn-soft); color: var(--warn); }
+.badge-danger { background: var(--danger-soft); color: var(--danger); }
+.chip { display: inline-block; padding: 2px 10px; border-radius: var(--r-pill); border: 1px solid var(--card-border); font-size: .8rem; cursor: pointer; }
+.alert { padding: 10px 14px; border-radius: var(--r-md); font-size: .88rem; margin-bottom: 12px; }
+.alert-danger { background: var(--danger-soft); color: var(--danger); }
+.alert-success { background: var(--ok-soft); color: var(--ok); }
+.stat-row { display: grid; grid-template-columns: repeat(auto-fit,minmax(140px,1fr)); gap: 14px; }
+.stat-card { background: var(--card); border: 1px solid var(--card-border); border-radius: var(--r-md); padding: 16px; text-align: center; }
+.stat-num { font-size: 1.3rem; font-weight: 600; }
+.stat-label { font-size: .8rem; color: var(--text2); }
+.seg { display: inline-flex; gap: 4px; padding: 4px; background: var(--card); border: 1px solid var(--card-border); border-radius: var(--r-pill); align-self: flex-start; }
+.seg-item { border: none; background: transparent; padding: 8px 18px; border-radius: var(--r-pill); color: var(--text2); cursor: pointer; font-size: .9rem; }
+.seg-active { background: var(--accent); color: #fff; }
+.node-grid { display: grid; grid-template-columns: repeat(auto-fill,minmax(300px,1fr)); gap: 14px; }
+.node-card { border: 1px solid var(--card-border); border-radius: var(--r-md); padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+.node-revoked { opacity: .6; }
+.node-top { display: flex; align-items: flex-start; gap: 10px; }
+.node-dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 6px; flex: none; }
+.dot-on { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.dot-idle { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
+.dot-off { background: var(--text2); opacity: .5; }
+.node-meta { display: flex; flex-direction: column; gap: 2px; color: var(--text2); font-size: .8rem; }
+.node-foot { display: flex; justify-content: space-between; align-items: flex-end; gap: 8px; flex-wrap: wrap; margin-top: auto; }
+.cred-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px dashed var(--card-border); }
+.cred-row:last-child { border-bottom: none; }
+.cred-value { font-size: 1.02rem; word-break: break-all; }
+.env-block { background: var(--accent-soft); border-radius: var(--r-md); padding: 16px; font-family: var(--mono); font-size: .85rem; overflow-x: auto; white-space: pre; margin: 0; }
+.table-scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+th { text-align: left; color: var(--text2); font-weight: 500; font-size: .8rem; padding: 8px; border-bottom: 1px solid var(--card-border); white-space: nowrap; }
+td { padding: 8px; border-bottom: 1px solid var(--card-border); }
+tr:last-child td { border-bottom: none; }
+.topup-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.topup-form .input { flex: 1 1 140px; min-width: 110px; }
+.preset-row { display: flex; gap: 4px; }
+.empty { text-align: center; padding: 30px 16px; }
+.empty-icon { font-size: 2rem; margin-bottom: 8px; }
+.ok-text { color: var(--ok); } .warn-text { color: var(--warn); } .danger-text { color: var(--danger); }
+.link { color: var(--accent); cursor: pointer; text-decoration: none; }
+.topbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+<div class="wrap" id="app"></div>
+
+<script>
+'use strict';
+// ClussCloud 极简单页：注册 / 登录 / 学校看板 / 平台运营者。
+// 无框架、无构建；hash 路由；token 存 localStorage。
+var API = '/api';
+var app = document.getElementById('app');
+var state = {
+  token: localStorage.getItem('cc_token') || '',
+  role: localStorage.getItem('cc_role') || '',
+  org: JSON.parse(localStorage.getItem('cc_org') || 'null'),
+  name: localStorage.getItem('cc_name') || '',
+  activeTab: 'nodes'
+};
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+function yuan(m) { return (Number(m || 0) / 1e6).toFixed(2); }
+function shortTime(iso) { return iso ? String(iso).replace('T', ' ').slice(5, 16) : ''; }
+function relTime(iso) {
+  if (!iso) return '';
+  var s = String(iso);
+  if (s.indexOf('T') < 0) s = s.replace(' ', 'T') + 'Z';
+  else if (!/(Z|z|[+-]\d{2}:?\d{2})$/.test(s)) s += 'Z';
+  var t = new Date(s).getTime();
+  if (!isFinite(t)) return String(iso);
+  var m = Math.floor(Math.max(0, Date.now() - t) / 60000);
+  if (m < 1) return '刚刚';
+  if (m < 60) return m + ' 分钟前';
+  if (m < 1440) return Math.floor(m / 60) + ' 小时前';
+  return Math.floor(m / 1440) + ' 天前';
+}
+function api(method, url, body) {
+  var opts = { method: method, headers: { 'Content-Type': 'application/json' } };
+  if (state.token) opts.headers.Authorization = 'Bearer ' + state.token;
+  if (body !== undefined) opts.body = JSON.stringify(body);
+  return fetch(API + url, opts).then(function(r) {
+    return r.json().catch(function() { return { code: r.status, message: 'HTTP ' + r.status }; }).then(function(j) {
+      if (r.status === 401 && state.token) { logout(); throw new Error(j.message || '登录已过期'); }
+      if (r.status >= 400 || (j.code && j.code >= 400)) throw new Error(j.message || ('HTTP ' + r.status));
+      return j.data !== undefined ? j.data : j;
+    });
+  });
+}
+function copyText(text, btn) {
+  function done() {
+    if (!btn) return;
+    var old = btn.textContent;
+    btn.textContent = '✓ 已复制';
+    setTimeout(function() { btn.textContent = old; }, 1600);
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done);
+  else {
+    var ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    document.execCommand('copy'); document.body.removeChild(ta); done();
+  }
+}
+function logout() {
+  state.token = ''; state.role = ''; state.org = null; state.name = '';
+  ['cc_token', 'cc_role', 'cc_org', 'cc_name'].forEach(function(k) { localStorage.removeItem(k); });
+  render();
+}
+function setSession(d) {
+  state.token = d.token; state.role = d.role; state.name = d.name || '';
+  state.org = d.org || null;
+  localStorage.setItem('cc_token', d.token);
+  localStorage.setItem('cc_role', d.role || '');
+  localStorage.setItem('cc_name', state.name);
+  localStorage.setItem('cc_org', JSON.stringify(state.org));
+}
+
+// ---------- 游客视图 ----------
+var regResult = null;
+function viewGuest() {
+  var html =
+    '<header>' +
+      '<h1>ClussCloud · 多班同步管理公共服务</h1>' +
+      '<p class="hero-sub">为所有 Cluss 部署者解决「一个管理员同时管多个班」的问题：策略（模型与计价）一处下发、积分统一分配、各班用量回传对账。' +
+      '学生的对话与内容永远留在班级设备上，这里只有计量数据。</p>' +
+    '</header>' +
+    '<ol class="steps">' +
+      '<li class="step-card"><span class="step-num">1</span><div><b>注册学校</b></div><div class="tiny muted">填学校名和管理员账号，立刻拿到编号与接入密钥</div></li>' +
+      '<li class="step-card"><span class="step-num">2</span><div><b>复制 .env</b></div><div class="tiny muted">整块复制，粘到部署设备的 server/.env，重启即接入</div></li>' +
+      '<li class="step-card"><span class="step-num">3</span><div><b>登录看板</b></div><div class="tiny muted">各班节点在线状态、用量账目、积分分配，一页看清</div></li>' +
+    '</ol>';
+
+  if (regResult) {
+    html +=
+      '<section class="card">' +
+        '<div class="card-head"><h2>🎉 ' + esc(regResult.org_name) + ' 开通成功</h2><span class="badge badge-warn">接入密钥只显示这一次</span></div>' +
+        '<div class="cred-row"><div><div class="tiny muted">学校编号</div><div class="cred-value mono">' + esc(regResult.org_id) + '</div></div><button class="btn btn-ghost btn-sm" data-copy="' + esc(regResult.org_id) + '">复制</button></div>' +
+        '<div class="cred-row"><div><div class="tiny muted">管理员用户名</div><div class="cred-value mono">' + esc(regResult.username) + '</div></div><button class="btn btn-ghost btn-sm" data-copy="' + esc(regResult.username) + '">复制</button></div>' +
+        '<div class="cred-row"><div><div class="tiny muted">接入密钥</div><div class="cred-value mono">' + esc(regResult.org_secret) + '</div></div><button class="btn btn-ghost btn-sm" data-copy="' + esc(regResult.org_secret) + '">复制</button></div>' +
+        '<div style="margin:14px 0 8px" class="tiny muted">部署设备的 <code>server/.env</code>（整块复制即可，无需背记）</div>' +
+        '<pre class="env-block">' + esc(regResult.env_template) + '</pre>' +
+        '<div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">' +
+          '<button class="btn" data-copy="' + esc(regResult.env_template) + '">复制整块 .env</button>' +
+          '<button class="btn btn-ghost" id="btn-go-login">登录我的学校 →</button>' +
+        '</div>' +
+      '</section>';
+  } else {
+    html +=
+      '<div class="two-col">' +
+        '<section class="card">' +
+          '<div class="card-head"><h2>注册学校</h2><span class="badge">免费 · 即时生效</span></div>' +
+          '<form id="f-reg">' +
+            '<label class="field"><span class="field-label">学校名称 *</span><input class="input" name="school_name" placeholder="如：第一中学"></label>' +
+            '<label class="field"><span class="field-label">省市（可选，仅做统计）</span><input class="input" name="region" placeholder="如：江苏南京"></label>' +
+            '<div class="field-pair">' +
+              '<label class="field"><span class="field-label">管理员用户名 *</span><input class="input" name="username" placeholder="3-30 位字母/数字" autocapitalize="off" spellcheck="false"></label>' +
+              '<label class="field"><span class="field-label">登录密码 *</span><input class="input" type="password" name="password" placeholder="至少 8 位" autocomplete="new-password"></label>' +
+            '</div>' +
+            '<p class="tiny muted">不收集真实姓名等个人信息；编号和密钥都是复制粘贴用的，不需要背。</p>' +
+            '<div id="reg-error"></div>' +
+            '<button class="btn btn-block" type="submit">注册学校</button>' +
+          '</form>' +
+        '</section>' +
+        '<section class="card">' +
+          '<div class="card-head"><h2>登录</h2></div>' +
+          '<p class="tiny muted" style="margin-top:0">学校管理员用注册时的用户名登录；平台运营者用运营者账号登录。</p>' +
+          '<form id="f-login">' +
+            '<label class="field"><span class="field-label">账号</span><input class="input" name="username" autocapitalize="off" spellcheck="false"></label>' +
+            '<label class="field"><span class="field-label">密码</span><input class="input" type="password" name="password" autocomplete="current-password"></label>' +
+            '<div id="login-error"></div>' +
+            '<button class="btn btn-block" type="submit">登录</button>' +
+          '</form>' +
+        '</section>' +
+      '</div>';
+  }
+  return html;
+}
+
+function bindGuest() {
+  var freg = document.getElementById('f-reg');
+  if (freg) freg.addEventListener('submit', function(e) {
+    e.preventDefault();
+    var fd = new FormData(freg);
+    var body = {
+      school_name: fd.get('school_name'), region: fd.get('region'),
+      username: fd.get('username'), password: fd.get('password')
+    };
+    var errBox = document.getElementById('reg-error');
+    errBox.innerHTML = '';
+    api('POST', '/org/register', body).then(function(d) {
+      regResult = d; render(); window.scrollTo(0, 0);
+    }).catch(function(err) { errBox.innerHTML = '<div class="alert alert-danger">' + esc(err.message) + '</div>'; });
+  });
+
+  var flogin = document.getElementById('f-login');
+  if (flogin) flogin.addEventListener('submit', function(e) {
+    e.preventDefault();
+    var fd = new FormData(flogin);
+    var errBox = document.getElementById('login-error');
+    errBox.innerHTML = '';
+    api('POST', '/auth/login', { username: fd.get('username'), password: fd.get('password') }).then(function(d) {
+      setSession(d); render();
+    }).catch(function(err) { errBox.innerHTML = '<div class="alert alert-danger">' + esc(err.message) + '</div>'; });
+  });
+
+  var gol = document.getElementById('btn-go-login');
+  if (gol) gol.addEventListener('click', function() {
+    regResult = null; render();
+    var u = document.querySelector('#f-login input[name=username]');
+    if (u) { u.value = regResultUsername; u.focus(); }
+  });
+  app.querySelectorAll('[data-copy]').forEach(function(b) {
+    b.addEventListener('click', function() { copyText(b.getAttribute('data-copy'), b); });
+  });
+}
+var regResultUsername = '';
+
+// ---------- 学校看板 ----------
+var dash = { loaded: false, data: null, students: [], logs: [] };
+function viewDash() {
+  var d = dash.data;
+  var html =
+    '<div class="topbar"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">' +
+      '<h1>' + esc(state.org.name) + '</h1>' +
+      '<span class="chip mono" data-copy="' + esc(state.org.id) + '" title="点击复制学校编号">' + esc(state.org.id) + '</span>' +
+      (state.org.region ? '<span class="chip">' + esc(state.org.region) + '</span>' : '') +
+    '</div><div style="display:flex;gap:8px">' +
+      '<button class="btn btn-ghost btn-sm" id="btn-refresh">↻ 刷新</button>' +
+      '<button class="btn btn-ghost btn-sm" id="btn-logout">退出</button>' +
+    '</div></div>';
+
+  if (!d) return html + '<div class="card muted center">加载中…</div>';
+
+  var t = d.totals;
+  html +=
+    '<div class="stat-row">' +
+      stat(t.students, '已分配学生') + stat('¥' + yuan(t.allocated_micro), '累计分配') +
+      stat('¥' + yuan(t.used_micro), '累计消耗') + stat('¥' + yuan(t.month_cost_micro), '本月消耗') +
+      stat(t.calls, '调用次数') +
+    '</div>';
+
+  html += '<div class="seg" role="tablist">' +
+    segBtn('nodes', '班级节点', d.nodes.length) + segBtn('ledger', '额度台账', dash.students.length) + segBtn('logs', '额度流水') + '</div>';
+
+  if (state.activeTab === 'nodes') {
+    html += '<section class="card"><div class="card-head"><h2>班级节点</h2><span class="tiny muted">在线 = 最近 ' + Math.round(d.online_window_sec / 60) + ' 分钟内有同步；用量延迟约 5 分钟</span></div>';
+    if (!d.nodes.length) {
+      html += '<div class="empty"><div class="empty-icon">📡</div><div><b>还没有班级接入</b></div><div class="tiny muted">把注册时给的 .env 整块填到教室电脑的 server/.env，重启服务即可。</div></div>';
+    } else {
+      html += '<div class="node-grid">' + d.nodes.map(nodeCard).join('') + '</div>';
+    }
+    html += '</section>';
+  }
+
+  if (state.activeTab === 'ledger') {
+    html += '<section class="card"><div class="card-head"><h2>额度台账</h2><input class="input" id="kw" placeholder="按学号筛选…" style="max-width:220px"></div>' +
+      '<p class="tiny muted" style="margin-top:0">学生账号在本班设备上，这里按学号记账：分配 − 上报消耗 = 余额（分钟级延迟）。</p>' +
+      '<form class="topup-form" id="f-topup">' +
+        '<input class="input" name="user_id" placeholder="学号" autocapitalize="off" spellcheck="false">' +
+        '<input class="input" name="amount_yuan" type="number" min="0" step="0.01" placeholder="金额（元）" style="max-width:130px">' +
+        '<div class="preset-row">' + [1, 5, 10, 20].map(function(p) { return '<button type="button" class="btn btn-ghost btn-sm preset" data-p="' + p + '">+' + p + '元</button>'; }).join('') + '</div>' +
+        '<input class="input" name="weekly_quota_yuan" type="number" min="0" step="0.01" placeholder="周限额(元)" style="max-width:130px">' +
+        '<button class="btn" type="submit">充值</button>' +
+      '</form><div id="topup-msg"></div>' +
+      '<div class="table-scroll"><table><thead><tr><th>学号</th><th>分配</th><th>已用</th><th>余额</th><th>次数</th><th>最近使用</th></tr></thead><tbody>' +
+      (dash.students.length ? dash.students.map(function(s) {
+        var cls = s.balance_micro < 0 ? 'danger-text' : (s.balance_micro < 100000 ? 'warn-text' : 'ok-text');
+        return '<tr><td class="mono">' + esc(s.user_id) + '</td><td>¥' + yuan(s.allocated_micro) + '</td><td>¥' + yuan(s.used_micro) + '</td>' +
+          '<td class="' + cls + '">¥' + yuan(s.balance_micro) + '</td><td>' + s.calls + '</td><td class="muted">' + (s.last_usage_at ? relTime(s.last_usage_at) : '—') + '</td></tr>';
+      }).join('') : '<tr><td colspan="6" class="muted center">还没有分配记录 —— 在上面给第一个学生充值吧</td></tr>') +
+      '</tbody></table></div></section>';
+  }
+
+  if (state.activeTab === 'logs') {
+    html += '<section class="card"><div class="card-head"><h2>额度流水</h2><span class="tiny muted">每笔变动都有操作人，可对账</span></div>' +
+      '<div class="table-scroll"><table><thead><tr><th>时间</th><th>学号</th><th>变动</th><th>类型</th><th>说明</th><th>操作人</th></tr></thead><tbody>' +
+      (dash.logs.length ? dash.logs.map(function(l) {
+        return '<tr><td class="muted">' + shortTime(l.created_at) + '</td><td class="mono">' + esc(l.user_id) + '</td>' +
+          '<td class="' + (l.amount_micro >= 0 ? 'ok-text' : 'danger-text') + '">' + (l.amount_micro >= 0 ? '+' : '') + '¥' + yuan(l.amount_micro) + '</td>' +
+          '<td>' + esc(l.kind) + '</td><td class="muted">' + esc(l.reason) + '</td><td class="mono tiny muted">' + esc(l.operator) + '</td></tr>';
+      }).join('') : '<tr><td colspan="6" class="muted center">暂无流水</td></tr>') +
+      '</tbody></table></div></section>';
+  }
+  return html;
+}
+function stat(num, label) { return '<div class="stat-card"><div class="stat-num">' + num + '</div><div class="stat-label">' + label + '</div></div>'; }
+function segBtn(id, label, count) {
+  return '<button type="button" class="seg-item' + (state.activeTab === id ? ' seg-active' : '') + '" data-tab="' + id + '">' + label + (count !== undefined ? ' <span class="tiny">' + count + '</span>' : '') + '</button>';
+}
+function nodeCard(n) {
+  var revoked = n.status !== 'active';
+  var dot = revoked ? 'dot-off' : (n.online ? 'dot-on' : 'dot-idle');
+  var badge = revoked ? '<span class="badge badge-danger">已吊销</span>' : (n.online ? '<span class="badge badge-ok">在线</span>' : '<span class="badge badge-warn">失联</span>');
+  return '<div class="node-card' + (revoked ? ' node-revoked' : '') + '">' +
+    '<div class="node-top"><span class="node-dot ' + dot + '"></span>' +
+      '<div style="flex:1;min-width:0"><div><b>' + esc(n.label || n.instance_id) + '</b></div><div class="tiny mono muted">' + esc(n.instance_id) + '</div></div>' + badge + '</div>' +
+    '<div class="node-meta">' +
+      '<span>版本 ' + esc(n.node_version || '?') + '</span>' +
+      '<span>配置到达 额度v' + n.last_assign_version + ' / 模型v' + n.last_model_version + '</span>' +
+      '<span>最后上报 ' + (n.last_report_at ? relTime(n.last_report_at) : '从未') + '</span>' +
+    '</div>' +
+    '<div class="node-foot"><div><b>¥' + yuan(n.month_cost_micro) + '</b> <span class="tiny muted">本月 · 累计 ¥' + yuan(n.cost_micro) + ' / ' + n.calls + ' 次</span></div>' +
+      '<div style="display:flex;gap:6px">' +
+        '<button class="btn btn-ghost btn-sm" data-rename="' + esc(n.instance_id) + '" data-label="' + esc(n.label || '') + '">备注</button>' +
+        (revoked
+          ? '<button class="btn btn-ghost btn-sm" data-restore="' + esc(n.instance_id) + '">恢复</button>'
+          : '<button class="btn btn-ghost btn-sm btn-danger" data-revoke="' + esc(n.instance_id) + '" data-name="' + esc(n.label || n.instance_id) + '">吊销</button>') +
+      '</div></div></div>';
+}
+function bindDash() {
+  var r = document.getElementById('btn-refresh');
+  if (r) r.addEventListener('click', loadDash);
+  var lo = document.getElementById('btn-logout');
+  if (lo) lo.addEventListener('click', logout);
+  app.querySelectorAll('[data-tab]').forEach(function(b) {
+    b.addEventListener('click', function() { state.activeTab = b.getAttribute('data-tab'); render(); });
+  });
+  app.querySelectorAll('[data-copy]').forEach(function(b) {
+    b.addEventListener('click', function() { copyText(b.getAttribute('data-copy'), b); });
+  });
+  var kw = document.getElementById('kw');
+  if (kw) {
+    kw.value = dash.kw || '';
+    kw.addEventListener('input', function() {
+      dash.kw = kw.value;
+      clearTimeout(kw._t);
+      kw._t = setTimeout(function() { loadStudents(); }, 300);
+    });
+  }
+  var ft = document.getElementById('f-topup');
+  if (ft) {
+    ft.addEventListener('submit', function(e) {
+      e.preventDefault();
+      var fd = new FormData(ft);
+      var msg = document.getElementById('topup-msg');
+      api('POST', '/my/topup', {
+        user_id: fd.get('user_id'),
+        amount_yuan: Number(fd.get('amount_yuan')),
+        weekly_quota_yuan: fd.get('weekly_quota_yuan') === '' ? undefined : Number(fd.get('weekly_quota_yuan'))
+      }).then(function(d) {
+        msg.innerHTML = '<div class="alert alert-success">' + esc(d.message || '已充值') + '</div>';
+        ft.reset(); loadStudents(); loadDash();
+      }).catch(function(err) { msg.innerHTML = '<div class="alert alert-danger">' + esc(err.message) + '</div>'; });
+    });
+    app.querySelectorAll('.preset').forEach(function(b) {
+      b.addEventListener('click', function() { ft.querySelector('[name=amount_yuan]').value = b.getAttribute('data-p'); });
+    });
+  }
+  app.querySelectorAll('[data-rename]').forEach(function(b) {
+    b.addEventListener('click', function() {
+      var label = window.prompt('节点备注名（如「高一3班」）：', b.getAttribute('data-label') || '');
+      if (label === null) return;
+      api('PUT', '/my/nodes/' + encodeURIComponent(b.getAttribute('data-rename')), { label: label }).then(loadDash);
+    });
+  });
+  app.querySelectorAll('[data-revoke]').forEach(function(b) {
+    b.addEventListener('click', function() {
+      if (!window.confirm('确定吊销「' + b.getAttribute('data-name') + '」？该节点的同步将被拒绝。')) return;
+      api('POST', '/my/nodes/' + encodeURIComponent(b.getAttribute('data-revoke')) + '/revoke').then(loadDash);
+    });
+  });
+  app.querySelectorAll('[data-restore]').forEach(function(b) {
+    b.addEventListener('click', function() {
+      api('POST', '/my/nodes/' + encodeURIComponent(b.getAttribute('data-restore')) + '/restore').then(loadDash);
+    });
+  });
+}
+function loadDash() {
+  api('GET', '/my/overview').then(function(d) {
+    dash.data = d; dash.loaded = true;
+    if (state.org) state.org = d.org;
+    render();
+  }).catch(function() {});
+}
+function loadStudents() {
+  api('GET', '/my/students?keyword=' + encodeURIComponent(dash.kw || '')).then(function(d) {
+    dash.students = d.students; render();
+  }).catch(function() {});
+}
+
+// ---------- 平台运营者 ----------
+var plat = { loaded: false, data: null, mc: null, mcVersion: 0 };
+function viewPlatform() {
+  var html = '<div class="topbar"><h1>平台运营者</h1><button class="btn btn-ghost btn-sm" id="btn-logout">退出</button></div>';
+  if (!plat.data) return html + '<div class="card muted center">加载中…</div>';
+  var d = plat.data;
+  html += '<div class="stat-row">' + stat(d.totals.orgs, '注册学校') + stat(d.totals.nodes, '接入节点') + stat('¥' + yuan(d.totals.usage_cost_micro), '全网累计消耗') + '</div>';
+
+  html += '<section class="card"><div class="card-head"><h2>注册学校</h2></div><div class="table-scroll"><table>' +
+    '<thead><tr><th>编号</th><th>名称</th><th>省市</th><th>状态</th><th>本月消耗</th><th>操作</th></tr></thead><tbody>' +
+    d.orgs.map(function(o) {
+      return '<tr><td class="mono">' + esc(o.id) + '</td><td>' + esc(o.name) + '</td><td class="muted">' + esc(o.region || '—') + '</td>' +
+        '<td>' + (o.status === 'active' ? '<span class="badge badge-ok">正常</span>' : '<span class="badge badge-danger">停用</span>') + '</td>' +
+        '<td>¥' + yuan(o.month_cost_micro) + '</td>' +
+        '<td><button class="btn btn-ghost btn-sm ' + (o.status === 'active' ? 'btn-danger' : '') + '" data-org="' + esc(o.id) + '" data-act="' + (o.status === 'active' ? 'disable' : 'enable') + '">' +
+          (o.status === 'active' ? '停用' : '启用') + '</button></td></tr>';
+    }).join('') + '</tbody></table></div></section>';
+
+  html += '<section class="card"><div class="card-head"><h2>接入节点</h2><span class="tiny muted">全网 ' + d.nodes.length + ' 个</span></div><div class="table-scroll"><table>' +
+    '<thead><tr><th>实例</th><th>学校</th><th>备注</th><th>状态</th><th>版本</th><th>最后上报</th></tr></thead><tbody>' +
+    d.nodes.map(function(n) {
+      return '<tr><td class="mono">' + esc(n.instance_id) + '</td><td>' + esc(n.org_name || n.org_id) + '</td><td class="muted">' + esc(n.label || '—') + '</td>' +
+        '<td>' + (n.status === 'revoked' ? '<span class="badge badge-danger">吊销</span>' : (n.online ? '<span class="badge badge-ok">在线</span>' : '<span class="badge badge-warn">失联</span>')) + '</td>' +
+        '<td class="mono tiny">' + esc(n.node_version || '?') + '</td>' +
+        '<td class="muted tiny">' + (n.last_report_at ? relTime(n.last_report_at) : '从未') + '</td></tr>';
+    }).join('') + '</tbody></table></div></section>';
+
+  var mcHtml = '<section class="card"><div class="card-head"><h2>策略下发（模型与计价）</h2>' +
+    '<span class="' + (plat.mcVersion > 0 ? 'badge badge-ok' : 'badge badge-warn') + '">当前 v' + plat.mcVersion + (plat.mcVersion > 0 ? '' : '（尚未下发——节点拉到空配置会清空本机模型，务必先发布）') + '</span></div>' +
+    '<p class="tiny muted" style="margin-top:0">整份 JSON 即 Cluss 节点 <code>/api/sync/model-config</code> 的 data：models 需要 ai_models 全部业务列（id/label/api_url/api_key/model_name/api_style/价格三列/倍率/限免/峰谷…）。' +
+    '最省事的做法：从任意一台 Cluss relay 的同步接口复制整份响应，粘贴到下面保存。</p>' +
+    '<textarea class="input mono" id="mc-json" spellcheck="false">' + esc(JSON.stringify(plat.mc || { models: [], sources: [], meta: {} }, null, 2)) + '</textarea>' +
+    '<div style="display:flex;gap:10px;margin-top:12px;align-items:center;flex-wrap:wrap">' +
+      '<button class="btn" id="mc-save">保存并下发（版本 +1）</button><span id="mc-msg" class="tiny"></span>' +
+    '</div></section>';
+  html += mcHtml;
+  return html;
+}
+function bindPlatform() {
+  var lo = document.getElementById('btn-logout');
+  if (lo) lo.addEventListener('click', logout);
+  app.querySelectorAll('[data-org]').forEach(function(b) {
+    b.addEventListener('click', function() {
+      var act = b.getAttribute('data-act');
+      if (act === 'disable' && !window.confirm('停用后该校所有节点的同步都会被拒绝，确认？')) return;
+      api('POST', '/platform/orgs/' + b.getAttribute('data-org') + '/' + act).then(loadPlatform);
+    });
+  });
+  var save = document.getElementById('mc-save');
+  if (save) save.addEventListener('click', function() {
+    var msg = document.getElementById('mc-msg');
+    var doc;
+    try { doc = JSON.parse(document.getElementById('mc-json').value); }
+    catch (e) { msg.textContent = 'JSON 解析失败：' + e.message; msg.className = 'tiny danger-text'; return; }
+    api('PUT', '/platform/model-config', { config: doc }).then(function(d) {
+      msg.textContent = '✓ 已下发 v' + d.model_config_version;
+      msg.className = 'tiny ok-text';
+      plat.mc = doc; plat.mcVersion = d.model_config_version;
+    }).catch(function(err) { msg.textContent = err.message; msg.className = 'tiny danger-text'; });
+  });
+}
+function loadPlatform() {
+  Promise.all([
+    api('GET', '/platform/overview'),
+    api('GET', '/platform/model-config')
+  ]).then(function(rs) {
+    plat.data = rs[0]; plat.mc = rs[1].config; plat.mcVersion = rs[1].model_config_version; plat.loaded = true;
+    render();
+  }).catch(function() {});
+}
+
+// ---------- 渲染 ----------
+function render() {
+  var html;
+  if (!state.token) {
+    html = viewGuest();
+  } else if (state.role === 'platform') {
+    html = viewPlatform();
+  } else {
+    html = viewDash();
+  }
+  app.innerHTML = html;
+
+  if (!state.token) bindGuest();
+  else if (state.role === 'platform') bindPlatform();
+  else bindDash();
+}
+
+document.addEventListener('submit', function(e) { /* 表单各自绑定，占位防全局默认 */ }, true);
+
+render();
+if (state.token && state.role === 'platform') loadPlatform();
+if (state.token && state.role === 'org') { loadDash(); loadStudents(); }
+</script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "name": "cluss-cloud",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ClussCloud —— 多班同步管理公共服务（策略下发 / 积分分配 / 用量对账）。班级设备上跑 Cluss，云上只跑这个。",
+  "scripts": {
+    "start": "node server.js",
+    "verify": "node scripts/verify.cjs"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.2"
+  }
+}
