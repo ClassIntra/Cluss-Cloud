@@ -30,6 +30,21 @@ var express = require('express');
 var Database = require('better-sqlite3');
 var jwt = require('jsonwebtoken');
 
+// 极简 .env 加载：不覆盖已存在的环境变量（与 dotenv 同语义），省一个依赖
+(function loadEnv() {
+  var envPath = path.join(__dirname, '.env');
+  if (!fs.existsSync(envPath)) return;
+  fs.readFileSync(envPath, 'utf8').split('\n').forEach(function(line) {
+    line = line.trim();
+    if (!line || line.charAt(0) === '#') return;
+    var eq = line.indexOf('=');
+    if (eq < 1) return;
+    var k = line.slice(0, eq).trim();
+    var v = line.slice(eq + 1).trim().replace(/^["']|["']$/g, '');
+    if (!(k in process.env)) process.env[k] = v;
+  });
+})();
+
 // ------------------------------------------------------------
 // 配置
 // ------------------------------------------------------------
