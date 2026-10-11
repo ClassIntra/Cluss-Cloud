@@ -33,6 +33,14 @@ var PROMPTS = [
   '检查系统时间与时区、以及各常驻进程的运行时长，汇报是否正常。'
 ];
 
+
+// 覆盖今天的巡检指令（MC_PROMPT 环境变量，仅手动测试用）
+var overridePrompt = process.env.MC_PROMPT;
+if (overridePrompt) {
+  PROMPTS.length = 0;
+  PROMPTS.push(overridePrompt);
+}
+
 function fail(msg) {
   console.error('[daily-check] ' + msg);
   process.exit(1);
