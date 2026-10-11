@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // ============================================================
 // 每日巡检（浏览器版）：真实 chromium 打开任务页发送运维检查指令。
+// 背景与致平台说明：/workspace/cluss-cloud/NOTICE.md（务必先读）。
 //
-// 相比 daily-check.js（WS + Cookie）的优势：
-//   · 真浏览器指纹，平台 WAF 不拦；
-//   · 会话失效时用凭据文件里的账号密码**自动重新登录**，无需人工补 Cookie。
+// 相比 daily-check.js（WS + Cookie）的差异：
+//   · 真实浏览器环境，与人工操作一致；
+//   · 会话失效时用凭据文件里的账号密码自动重新登录，无需人工补登。
 //
 // 凭据 /root/.clusscloud-check.json（0600）：{ "email": "...", "password": "..." }
 // 会话状态：/root/.clusscloud-browser-state.json（playwright storageState，自动续存）

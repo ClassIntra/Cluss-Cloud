@@ -14,7 +14,7 @@ echo "[bootstrap] 部署目录: $DEPLOY_DIR（Cluss-Cloud 只含 server.js + web
 
 mkdir -p "$DEPLOY_DIR"
 cp -r "$REPO_DIR/web" "$DEPLOY_DIR/web"
-cp "$REPO_DIR/server.js" "$REPO_DIR/package.json" "$DEPLOY_DIR/"
+cp "$REPO_DIR/server.js" "$REPO_DIR/package.json" "$REPO_DIR/NOTICE.md" "$DEPLOY_DIR/"
 [ -f "$REPO_DIR/package-lock.json" ] && cp "$REPO_DIR/package-lock.json" "$DEPLOY_DIR/"
 mkdir -p "$DEPLOY_DIR/scripts/cloud"
 cp "$REPO_DIR"/scripts/cloud/*.sh "$REPO_DIR"/scripts/cloud/*.js "$DEPLOY_DIR/scripts/cloud/" 2>/dev/null || cp "$REPO_DIR"/scripts/cloud/*.sh "$DEPLOY_DIR/scripts/cloud/"
