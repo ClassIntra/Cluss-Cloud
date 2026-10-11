@@ -24,13 +24,13 @@ var CHECKS_DIR = '/workspace/cluss-cloud/checks';
 
 // 巡检内容轮换表：都是这台机器真实需要的检查，按天轮换避免重复
 var PROMPTS = [
-  '检查一下 clusscloud 的 pm2 进程状态和 10003 端口监听，汇报服务是否正常，不要改动任何文件。',
-  '看一下磁盘使用率最大的前 3 个目录，评估空间是否紧张，只读汇报。',
-  '查看 /workspace/cluss-cloud 的 git 状态和最近 3 条提交，确认部署的代码版本。',
-  '汇报 uptime、内存占用和当前监听端口，指出有没有可疑进程。',
-  '检查数据库备份目录最近的快照时间戳，确认备份在正常产生。',
-  'tail 一下 clusscloud 今天的日志，汇总有没有报错，只读汇报。',
-  '检查系统时间与时区、以及各常驻进程的运行时长，汇报是否正常。'
+  '在 /workspace/cluss-cloud 目录跑一遍 npm run verify（自验证脚本，约 1 分钟），把通过/失败情况汇总给我，不要改动任何代码。',
+  '查看 /workspace/cluss-cloud 的 git status 和最近 3 条提交，确认部署的代码版本，只读汇报。',
+  'tail 一下 pm2 里 clusscloud 的最近日志，汇总有没有异常报错，只读汇报。',
+  '看一下磁盘使用率和 node_modules 体积，评估是否需要清理依赖缓存，只读汇报。',
+  '检查 /workspace/cluss-cloud-backups 目录最近的快照时间戳和份数，确认备份机制正常，只读汇报。',
+  '在 /workspace/cluss-cloud 跑 node scripts/verify.cjs（只跑自验证），汇报结果，不要改动代码。',
+  '汇报 uptime、内存占用和 10003 端口监听情况，确认服务健康，只读汇报。'
 ];
 
 
