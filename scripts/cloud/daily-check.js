@@ -118,14 +118,20 @@ function runCheck(cookie, prompt) {
 // ---- 主流程 ----
 (function main() {
   if (!fs.existsSync(CREDS_PATH)) {
-    fail('缺少凭据文件 ' + CREDS_PATH + '（root 0600，内容 {"email","password"}）');
+    fail('缺少凭据文件 ' + CREDS_PATH + '（root 0600）');
   }
   var creds = JSON.parse(fs.readFileSync(CREDS_PATH, 'utf8'));
   var prompt = todayPrompt();
   var stamp = nowStamp();
   console.log('[daily-check] %s 巡检开始', stamp);
 
-  login(creds).then(function(cookie) {
+  // 两种凭据形态：{"cookie":"..."}（首选，免登录）；或 {"email","password"}（密码登录，
+  // 平台 WAF 对脚本指纹的登录请求可能拦截，优先用 cookie）
+  var cookiePromise = creds.cookie
+    ? Promise.resolve(creds.cookie)
+    : login(creds);
+
+  cookiePromise.then(function(cookie) {
     return runCheck(cookie, prompt);
   }).then(function(result) {
     fs.mkdirSync(CHECKS_DIR, { recursive: true });
