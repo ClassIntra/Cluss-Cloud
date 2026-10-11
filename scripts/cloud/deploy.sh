@@ -24,9 +24,9 @@ log() { echo "[deploy] $*"; }
 
 do_deploy() {
   local restore_flag="$1"
-  log "打包（server.js + web + 云脚本）…"
+  log "打包（server.js + web + NOTICE + 云脚本）…"
   local tgz="/tmp/clusscloud-deploy.tar.gz"
-  tar czf "$tgz" -C "$REPO_DIR" server.js web package.json package-lock.json scripts/cloud
+  tar czf "$tgz" -C "$REPO_DIR" server.js web package.json package-lock.json NOTICE.md scripts/cloud
   log "上传…"
   $SSH "mkdir -p /tmp/clusscloud-deploy"
   $SCP "$tgz" "$USER@$HOST:/tmp/clusscloud-deploy.tar.gz" >/dev/null
