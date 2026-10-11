@@ -34,11 +34,11 @@ do_deploy() {
   local restore_env=""
   if [ "$restore_flag" = "restore" ]; then
     local latest
-    latest=$(ls -1t "$LOCAL_BACKUP_DIR"/clusscloud-*.db.gz 2>/dev/null | head -1 || true)
+    latest=$(ls -1t "$LOCAL_BACKUP_DIR"/clusscloud-*.tar.gz 2>/dev/null | head -1 || true)
     if [ -n "$latest" ]; then
-      log "上传最新备份用于恢复: $latest"
-      $SCP "$latest" "$USER@$HOST:/tmp/clusscloud-restore.db.gz" >/dev/null
-      restore_env="CLUSS_RESTORE_DB=/tmp/clusscloud-restore.db.gz"
+      log "上传本地最新备份用于恢复: $latest"
+      $SCP "$latest" "$USER@$HOST:/tmp/clusscloud-restore.tar.gz" >/dev/null
+      restore_env="CLUSS_RESTORE_DB=/tmp/clusscloud-restore.tar.gz"
     else
       log "（本地没有可用备份，跳过恢复）"
     fi
@@ -52,7 +52,7 @@ do_pull_backup() {
   $SSH "CLUSS_DEPLOY_DIR=$DEPLOY_DIR bash $DEPLOY_DIR/scripts/cloud/backup-data.sh"
   mkdir -p "$LOCAL_BACKUP_DIR"
   local remote_latest
-  remote_latest=$($SSH "ls -1t $DEPLOY_DIR-backups/clusscloud-*.db.gz 2>/dev/null | head -1")
+  remote_latest=$($SSH "ls -1t $DEPLOY_DIR-backups/clusscloud-*.tar.gz 2>/dev/null | head -1")
   [ -n "$remote_latest" ] || { log "远程没有备份文件"; exit 1; }
   log "拉回: $remote_latest"
   $SCP "$USER@$HOST:$remote_latest" "$LOCAL_BACKUP_DIR/" >/dev/null

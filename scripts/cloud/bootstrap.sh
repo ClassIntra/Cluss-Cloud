@@ -44,8 +44,20 @@ fi
 if [ -n "${CLUSS_RESTORE_DB:-}" ] && [ ! -f database/clusscloud.db ]; then
   mkdir -p database
   case "$CLUSS_RESTORE_DB" in
-    *.gz) gunzip -c "$CLUSS_RESTORE_DB" > database/clusscloud.db ;;
-    *)    cp "$CLUSS_RESTORE_DB" database/clusscloud.db ;;
+    # 新格式：tar.gz（clusscloud.db + .env）
+    *.tar.gz)
+      RST=/tmp/cc-restore; mkdir -p "$RST"
+      tar -xzf "$CLUSS_RESTORE_DB" -C "$RST"
+      cp "$RST/clusscloud.db" database/clusscloud.db
+      # .env 只在机器上没有时才恢复（不覆盖本次生成的新配置）
+      if [ -f "$RST/.env" ] && [ ! -f .env ]; then
+        cp "$RST/.env" .env
+        echo "[bootstrap] 已一并恢复 .env（JWT_SECRET 与运营者密码保持原样）"
+      fi
+      rm -rf "$RST"
+      ;;
+    *.db.gz) gunzip -c "$CLUSS_RESTORE_DB" > database/clusscloud.db ;;
+    *)       cp "$CLUSS_RESTORE_DB" database/clusscloud.db ;;
   esac
   echo "[bootstrap] 已从备份恢复数据库: $CLUSS_RESTORE_DB"
 fi
