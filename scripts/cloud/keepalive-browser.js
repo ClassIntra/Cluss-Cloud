@@ -130,7 +130,10 @@ async function closeNagDialogs(page) {
     await page.waitForTimeout(8000);
 
     var boxValue = await box.inputValue().catch(function() { return 'gone'; });
-    var sent = boxValue === '';
+    // 发送成功的两种表现：输入框清空；或任务进入运行态（运行中输入框会保留文字并排队）
+    var running = await page.locator(':text("任务正在执行"), :text("任务执行中")')
+      .first().isVisible().catch(function() { return false; });
+    var sent = boxValue === '' || running;
     var file = path.join(CHECKS_DIR, 'browser-' + stamp() + '.log');
     fs.mkdirSync(CHECKS_DIR, { recursive: true });
     fs.writeFileSync(file, 'prompt: ' + prompt + '\nlogin: ' + logged + '\nsent: ' + sent + '\nurl: ' + page.url() + '\n');
