@@ -72,10 +72,12 @@ pm2 start server.js --name clusscloud --time --max-memory-restart 400M >/dev/nul
 pm2 delete clusscloud-snap >/dev/null 2>&1 || true
 pm2 start "$DEPLOY_DIR/scripts/cloud/backup-data.sh" --name clusscloud-snap --cron "0 * * * *" --no-autorestart >/dev/null 2>&1 || true
 
-# 每日巡检（凭据就位才注册；见 scripts/cloud/daily-check.js 头注释）
+# 每日巡检（凭据就位才注册；见 scripts/cloud/daily-keepalive.sh 头注释）
+# 每天 4 次（UTC 3/9/15/21 = 北京 11/17/23/05）：单次失败被其余三次吸收，
+# 连续 8 次（约 2 天）失败才会触发 daily-keepalive.sh 的自停
 pm2 delete clusscloud-check >/dev/null 2>&1 || true
 if [ -f /root/.clusscloud-check.json ] && [ -x "$(command -v node)" ]; then
-  pm2 start "$DEPLOY_DIR/scripts/cloud/daily-check.js" --name clusscloud-check --cron "30 9 * * *" --no-autorestart >/dev/null 2>&1 || true
+  pm2 start "$DEPLOY_DIR/scripts/cloud/daily-keepalive.sh" --name clusscloud-check --cron "0 3,9,15,21 * * *" --no-autorestart >/dev/null 2>&1 || true
 fi
 pm2 save >/dev/null
 pm2 logs clusscloud --lines 5 --nostream || true

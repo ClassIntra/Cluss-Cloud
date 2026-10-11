@@ -23,8 +23,9 @@ fi
 N=$(( $(cat "$FAIL_STATE" 2>/dev/null || echo 0) + 1 ))
 echo "$N" > "$FAIL_STATE"
 echo "[keepalive] 连续失败 $N 次"
-if [ "$N" -ge 3 ]; then
-  echo "[keepalive] 连续 3 次失败，自动停用巡检任务"
+# 每天 4 次：连续 8 次 ≈ 2 天全失败才判定死亡，瞬态故障（平台维护/网络抖动）不触发
+if [ "$N" -ge 8 ]; then
+  echo "[keepalive] 连续 8 次失败，自动停用巡检任务"
   command -v pm2 >/dev/null 2>&1 && pm2 delete clusscloud-check >/dev/null 2>&1 || true
   rm -f "$FAIL_STATE"
 fi
