@@ -25,6 +25,9 @@ log "=== 开始每日备份 ==="
 if CLOUD_SSH_HOST=127.0.0.1 CLOUD_SSH_PORT=$LOCAL_PORT \
    bash "$REPO_DIR/scripts/cloud/deploy.sh" --pull-backup >> "$LOG" 2>&1; then
   log "备份成功"
+  # 顺带汇报每日巡检健康度（最近一次巡检记录距今多久）
+  CHECK_INFO=$($SSH "ls -1t $DEPLOY_DIR/checks/*.log 2>/dev/null | head -1 | xargs -r basename" 2>/dev/null || true)
+  log "最近巡检记录: ${CHECK_INFO:-无（巡检未运行或失败，需检查 clusscloud-check）}"
 else
   log "备份失败（云机可能已重置或隧道失效，需按 runbook 重建）"
   exit 1
