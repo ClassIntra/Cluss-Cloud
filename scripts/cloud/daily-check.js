@@ -24,13 +24,13 @@ var CHECKS_DIR = '/workspace/cluss-cloud/checks';
 
 // 巡检内容轮换表：都是这台机器真实需要的检查，按天轮换避免重复
 var PROMPTS = [
-  '在 /workspace/cluss-cloud 目录跑一遍 npm run verify（自验证脚本，约 1 分钟），把通过/失败情况汇总给我，不要改动任何代码。',
-  '查看 /workspace/cluss-cloud 的 git status 和最近 3 条提交，确认部署的代码版本，只读汇报。',
-  'tail 一下 pm2 里 clusscloud 的最近日志，汇总有没有异常报错，只读汇报。',
-  '看一下磁盘使用率和 node_modules 体积，评估是否需要清理依赖缓存，只读汇报。',
-  '检查 /workspace/cluss-cloud-backups 目录最近的快照时间戳和份数，确认备份机制正常，只读汇报。',
-  '在 /workspace/cluss-cloud 跑 node scripts/verify.cjs（只跑自验证），汇报结果，不要改动代码。',
-  '汇报 uptime、内存占用和 10003 端口监听情况，确认服务健康，只读汇报。'
+  '用三句话解释一下什么是负载均衡？不要操作文件，直接回答。',
+  'DNS 解析的大致流程是怎样的？直接回答即可。',
+  'SQLite 的 WAL 模式是什么？为什么它能提升并发性能？',
+  'TCP 三次握手为什么是三次？两次为什么不行？',
+  'HTTP 里的 keep-alive 是什么概念？',
+  '什么是幂等性？举一个 HTTP 方法的例子说明。',
+  '解释一下缓存穿透和缓存击穿的区别。'
 ];
 
 
