@@ -13,6 +13,10 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 echo "[bootstrap] 部署目录: $DEPLOY_DIR（Cluss-Cloud 只含 server.js + web + 脚本）"
 
 mkdir -p "$DEPLOY_DIR"
+# cp -r src dst 在 dst 已存在时会套娃成 dst/src（于是变成 web/web），
+# 结果是网页更新永远不生效而 server.js 却一直在变——这种「一半生效」的
+# 部署最耗人。先清空再拷，别用 cp -r。
+rm -rf "$DEPLOY_DIR/web"
 cp -r "$REPO_DIR/web" "$DEPLOY_DIR/web"
 cp "$REPO_DIR/server.js" "$REPO_DIR/package.json" "$REPO_DIR/NOTICE.md" "$DEPLOY_DIR/"
 [ -f "$REPO_DIR/package-lock.json" ] && cp "$REPO_DIR/package-lock.json" "$DEPLOY_DIR/"
