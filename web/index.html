@@ -291,7 +291,9 @@ function bindGuest() {
     var errBox = document.getElementById('login-error');
     errBox.innerHTML = '';
     api('POST', '/auth/login', { username: fd.get('username'), password: fd.get('password') }).then(function(d) {
-      setSession(d); render();
+      // 登录后必须把数据一起拉起来：只 render() 的话 dash.loaded 仍是 false，
+      // 用户会一直卡在「加载中…」，只有刷新页面才正常。
+      setSession(d); render(); loadAfterLogin();
     }).catch(function(err) { errBox.innerHTML = '<div class="alert alert-danger">' + esc(err.message) + '</div>'; });
   });
 
@@ -549,6 +551,12 @@ function loadStudents() {
     dash.students = d.students; render();
   }).catch(function() {});
 }
+// 登录后 / 页面启动时拉数据，两条路径共用。漏了哪条都会卡在「加载中…」。
+function loadAfterLogin() {
+  if (!state.token) return;
+  if (state.role === 'platform') loadPlatform();
+  else { loadDash(); loadStudents(); loadBindings(); }
+}
 
 // ---------- 平台运营者 ----------
 var plat = { loaded: false, data: null, mc: null, mcVersion: 0 };
@@ -648,8 +656,7 @@ function render() {
 document.addEventListener('submit', function(e) { /* 表单各自绑定，占位防全局默认 */ }, true);
 
 render();
-if (state.token && state.role === 'platform') loadPlatform();
-if (state.token && state.role === 'org') { loadDash(); loadStudents(); loadBindings(); }
+loadAfterLogin();
 </script>
 </body>
 </html>
