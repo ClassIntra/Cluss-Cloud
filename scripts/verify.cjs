@@ -310,9 +310,138 @@ function main() {
       orgA && orgA.admin_binding && orgA.admin_binding.class_user_id === '100202',
       JSON.stringify(orgA && orgA.admin_binding));
 
-    console.log('\n== ⑧ 学生台账 / 额度归零 / 密钥隔离 ==');
-    return http('GET', baseUrl + '/api/my/students', undefined, { Authorization: 'Bearer ' + tokenA })
+    console.log('\n== ⑧ 配置上行写：席位班管在本地改 → 同步全校 ==');
+    // 上一节结束时 A 校席位已在 class-a2（学号 100202）上。
+    var SEAT = { instance: 'class-a2', user: '100202' };
+    var OTHER = { instance: 'class-a1', user: '100101' };
+    var seatNode = function(v) {
+      var h = nodeHeaders(global.A.org_id, SEAT.instance, v || 0, v || 0);
+      return h;
+    };
+    var cfg = {
+      models: [{ id: 'up-model', label: '上行模型', api_url: 'https://api.example.com', api_key: 'sk-node', model_name: 'up-model', api_style: 'openai', price_in: 1000, price_out: 2000, price_cache_hit: 100, is_free: 0, enabled: 1, is_default: 1 }],
+      sources: [{ id: 'up-src', label: '上行源', api_url: 'https://src.example.com', api_key: 'sk-src', api_style: 'openai', enabled: 1 }],
+      meta: { vision_enabled: '1', offpeak_enabled: '0' }
+    };
+
+    return http('POST', baseUrl + '/api/sync/policy',
+      { base_version: 99, class_user_id: SEAT.user, class_admin: true, config: cfg }, seatNode())
       .then(function(r) {
+        ok('版本对不上时推配置被拒（409，防止静默覆盖）', r.status === 409, 'HTTP ' + r.status);
+        return http('POST', baseUrl + '/api/sync/policy',
+          { class_user_id: OTHER.user, class_admin: true, config: cfg }, nodeHeaders(global.A.org_id, OTHER.instance, 0, 0));
+      }).then(function(r) {
+        ok('非席位班推配置被拒（403）', r.status === 403, 'HTTP ' + r.status + ' ' + (r.data && r.data.message));
+        ok('拒绝原因说清了席位在哪个班', r.status === 403 && String(r.data.message).indexOf(SEAT.instance) > 0,
+          r.data && r.data.message);
+        return http('POST', baseUrl + '/api/sync/policy',
+          { class_user_id: SEAT.user, class_admin: false, config: cfg }, seatNode());
+      }).then(function(r) {
+        ok('不是班管的账号推配置被拒（403）', r.status === 403, 'HTTP ' + r.status);
+        return http('POST', baseUrl + '/api/sync/policy',
+          { class_user_id: '999999', class_admin: true, config: cfg }, seatNode());
+      }).then(function(r) {
+        ok('学号与席位不符被拒（403）', r.status === 403, 'HTTP ' + r.status);
+        return http('POST', baseUrl + '/api/sync/policy',
+          { class_admin: true, config: cfg }, seatNode());
+      }).then(function(r) {
+        ok('不报学号被拒（403）', r.status === 403, 'HTTP ' + r.status);
+        return http('POST', baseUrl + '/api/sync/policy',
+          { class_user_id: SEAT.user, class_admin: true, config: cfg },
+          nodeHeaders(global.B.org_id, SEAT.instance, 0, 0));
+      }).then(function(r) {
+        ok('B 校拿 A 校席位推不了（403）', r.status === 403, 'HTTP ' + r.status);
+        return http('GET', baseUrl + '/api/my/bindings', undefined, { Authorization: 'Bearer ' + tokenA });
+      }).then(function(r) {
+        var mv = (r.data.data.binding && 0) || 0;
+        global.CUR_MODEL_V = 1; // 上一节推过一次模型配置，版本从 1 起
+        return http('POST', baseUrl + '/api/sync/policy',
+          { base_version: global.CUR_MODEL_V, class_user_id: SEAT.user, class_admin: true, config: cfg }, seatNode());
+      }).then(function(r) {
+        ok('席位班管推配置成功', r.status === 200, 'HTTP ' + r.status + ' ' + (r.data && r.data.message));
+        ok('版本号递增', r.status === 200 && r.data.data.model_config_version > 1,
+          JSON.stringify(r.data && r.data.data));
+        global.CUR_MODEL_V = r.data.data.model_config_version;
+        return http('GET', baseUrl + '/api/sync/model-config', undefined,
+          nodeHeaders(global.A.org_id, OTHER.instance, 0, 0));
+      }).then(function(r) {
+        // 关键验收：另一个班的节点要能读到席位班推上来的配置
+        var models = (r.data && r.data.data && r.data.data.models) || [];
+        ok('另一个班的节点读到了推送的配置',
+          models.some(function(m) { return m.id === 'up-model'; }),
+          JSON.stringify(models.map(function(m) { return m.id; })));
+        ok('模型源也一并同步', ((r.data.data.sources) || []).some(function(s) { return s.id === 'up-src'; }));
+        return http('GET', baseUrl + '/api/sync/model-config', undefined,
+          nodeHeaders(global.A.org_id, SEAT.instance, 0, 0));
+      }).then(function(r) {
+        var models = (r.data.data.models) || [];
+        ok('推送的配置里的 api_key 仍按校隔离',
+          models.every(function(m) { return m.api_key !== 'sk-node'; }),
+          JSON.stringify(models.map(function(m) { return m.api_key; })));
+        return http('POST', baseUrl + '/api/sync/policy',
+          { base_version: 1, class_user_id: SEAT.user, class_admin: true, config: cfg }, seatNode());
+      }).then(function(r) {
+        ok('重复用旧 base_version 推被拒（CAS 生效）', r.status === 409, 'HTTP ' + r.status);
+        return http('POST', baseUrl + '/api/sync/policy',
+          { class_user_id: SEAT.user, class_admin: true, config: { models: [{ label: '缺 id' }] } }, seatNode());
+      }).then(function(r) {
+        ok('模型缺 id 被拒（400）', r.status === 400, 'HTTP ' + r.status);
+
+        // ---- 额度上行 ----
+        return http('POST', baseUrl + '/api/sync/allocations',
+          { class_user_id: OTHER.user, class_admin: true, items: [{ user_id: '100101', allocated_micro: 8888, idem_key: 'k-other' }] },
+          nodeHeaders(global.A.org_id, OTHER.instance, 0, 0));
+      }).then(function(r) {
+        ok('非席位班推额度被拒（403）', r.status === 403, 'HTTP ' + r.status);
+        return http('GET', baseUrl + '/api/my/overview', undefined, { Authorization: 'Bearer ' + tokenA });
+      }).then(function(r) {
+        global.CUR_ASSIGN_V = parseInt(r.data.data.assign_version, 10) || 0;
+        return http('POST', baseUrl + '/api/sync/allocations', {
+          base_version: global.CUR_ASSIGN_V,
+          class_user_id: SEAT.user,
+          class_admin: true,
+          items: [
+            { user_id: '100303', allocated_micro: 3000000, weekly_quota_micro: 0, reason: '本机分配', idem_key: 'up-idem-001' },
+            { user_id: '100404', allocated_micro: 5000000, weekly_quota_micro: 0, reason: '本机分配', idem_key: 'up-idem-002' }
+          ]
+        }, seatNode());
+      }).then(function(r) {
+        ok('席位班管推额度成功', r.status === 200 && r.data.data.applied === 2,
+          'HTTP ' + r.status + ' ' + JSON.stringify(r.data && r.data.data));
+        global.CUR_ASSIGN_V = r.data.data.assign_version;
+        return http('GET', baseUrl + '/api/sync/assignments', undefined, nodeHeaders(global.A.org_id, OTHER.instance, 0, 0));
+      }).then(function(r) {
+        var a = (r.data.data.assignments) || [];
+        var hit = a.filter(function(x) { return x.user_id === '100303' && x.allocated_micro === 3000000; });
+        ok('另一个班拉到席位班推的额度', hit.length === 1,
+          JSON.stringify(a.map(function(x) { return x.user_id + '=' + x.allocated_micro; })));
+        return http('POST', baseUrl + '/api/sync/allocations', {
+          base_version: global.CUR_ASSIGN_V,
+          class_user_id: SEAT.user, class_admin: true,
+          items: [{ user_id: '100303', allocated_micro: 3000000, weekly_quota_micro: 0, reason: '重试', idem_key: 'up-idem-001' }]
+        }, seatNode());
+      }).then(function(r) {
+        ok('同一 idem_key 重放不重复生效', r.status === 200 && r.data.data.skipped >= 1,
+          JSON.stringify(r.data && r.data.data));
+        return http('GET', baseUrl + '/api/my/logs?limit=20', undefined, { Authorization: 'Bearer ' + tokenA });
+      }).then(function(r) {
+        var logs = (r.data.data.logs) || [];
+        var dups = logs.filter(function(l) { return l.user_id === '100303' && l.amount_micro === 3000000; });
+        ok('流水里没有重复记账', dups.length <= 1, '匹配流水 ' + dups.length + ' 条');
+        ok('流水记下了操作来自哪个班', logs.some(function(l) { return String(l.reason).indexOf(SEAT.instance) > 0; }),
+          JSON.stringify(logs.slice(0, 2).map(function(l) { return l.reason; })));
+        return http('POST', baseUrl + '/api/sync/allocations', {
+          base_version: 1, class_user_id: SEAT.user, class_admin: true,
+          items: [{ user_id: '100303', allocated_micro: 1, idem_key: 'up-idem-003' }]
+        }, seatNode());
+      }).then(function(r) {
+        ok('额度推的 CAS 也生效', r.status === 409, 'HTTP ' + r.status);
+        return http('GET', baseUrl + '/api/my/overview', undefined, { Authorization: 'Bearer ' + tokenA });
+      }).then(function(r) {
+        ok('上行写不会误伤其他学校的密钥隔离', r.status === 200);
+        console.log('\n== ⑨ 学生台账 / 额度归零 / 密钥隔离 ==');
+        return http('GET', baseUrl + '/api/my/students', undefined, { Authorization: 'Bearer ' + tokenA });
+      }).then(function(r) {
         // 这条路由以前从没被验证套件碰过，于是「参数个数不对 → 恒 500」
         // 一直没人发现，学生的额度台账页从上线起就是坏的。
         ok('学生台账接口不 500', r.status === 200, 'HTTP ' + r.status);
@@ -366,16 +495,16 @@ function main() {
         ok('平台视图能看出哪校配了密钥',
           oa && oa.has_model_key === true && ob && ob.has_model_key === false,
           'A=' + (oa && oa.has_model_key) + ' B=' + (ob && ob.has_model_key));
-      }).then(function() {
-        console.log('\n========================================');
-        console.log('结果: ' + pass + ' 通过, ' + fail + ' 失败');
-        console.log('========================================');
-        shutdown(fail ? 1 : 0);
       });
   }).catch(function(err) {
     console.error('\n验证异常:', err && err.message);
     if (child) console.error('--- 服务日志尾部 ---\n' + child.buf().split('\n').slice(-25).join('\n'));
     shutdown(1);
+  }).then(function() {
+    console.log('\n========================================');
+    console.log('结果: ' + pass + ' 通过, ' + fail + ' 失败');
+    console.log('========================================');
+    shutdown(fail ? 1 : 0);
   });
 }
 

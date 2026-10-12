@@ -318,7 +318,44 @@ function requireNode(req, res, next) {
     return res.status(403).json({ code: 403, message: '节点已被吊销，同步被拒绝' });
   }
   req.nodeOrg = orgId;
+  req.nodeInstance = String(req.headers['x-cluss-instance'] || '').trim();
   next();
+}
+
+// ------------------------------------------------------------
+// 上行写的授权：只有「管理员席位」所在的那个班能改全校配置
+// ------------------------------------------------------------
+// 依据是已有的账号绑定：一个学校只有一个 active 席位（ux_bind_org 保证），
+// 席位记着是哪个班（instance_id）的哪个学号。把这个既有关系升级成
+// 配置写入权的来源——不新建角色表，也不会出现两班互相覆盖。
+function seatBinding(orgId) {
+  return db.prepare("SELECT * FROM account_bindings WHERE org_id = ? AND status = 'active'").get(orgId) || null;
+}
+
+// 校验「本节点持有本校的管理员席位」。返回 {ok:true, binding} 或 {ok:false, reason}
+function checkSeat(req) {
+  var orgId = req.nodeOrg;
+  var instanceId = req.nodeInstance;
+  if (!instanceId) return { ok: false, code: 400, reason: '缺少实例标识' };
+
+  var b = req.body || {};
+  // 本机登录的确实是班管（与 bind-request 同一套前提）
+  if (!b.class_admin) {
+    return { ok: false, code: 403, reason: '只有本班班管可以修改全校配置（当前账号不是班管）' };
+  }
+  var seat = seatBinding(orgId);
+  if (!seat) {
+    return { ok: false, code: 403, reason: '本校还没有认领管理员席位，无法修改全校配置。请先在云端完成账号绑定。' };
+  }
+  if (seat.instance_id !== instanceId) {
+    return { ok: false, code: 403, reason: '本校管理员席位在另一个班（' + seat.instance_id + '），本班只能查看。' };
+  }
+  // 学号也要对得上：光有班管身份不够，还得是绑定的那个班管本人
+  var classUserId = String(b.class_user_id || '').trim();
+  if (!classUserId || seat.class_user_id !== classUserId) {
+    return { ok: false, code: 403, reason: '发起操作的学号与管理员席位不一致' };
+  }
+  return { ok: true, binding: seat };
 }
 
 // ------------------------------------------------------------
@@ -969,6 +1006,170 @@ app.post('/api/platform/orgs/:orgId/:action(disable|enable)', requireWeb, requir
   db.prepare('UPDATE orgs SET status = ? WHERE id = ?').run(status, org.id);
   console.log('[Platform] 学校 %s → %s', org.id, status);
   res.json({ code: 200, message: status === 'disabled' ? '已停用，该校节点同步将被拒绝' : '已启用' });
+});
+
+// ------------------------------------------------------------
+// 配置上行写 · 第一节：席位班管在本地改完，推给全校
+//
+// 这是「搞 Cloud 的理由」本身：管理员坐在教室电脑前就能改模型配置、
+// 调积分，改完同步到同校所有班，而不是登云端网页改。
+//
+// 落库复用既有的 meta.model_config（{models, sources, meta}），所以下行
+// 的 GET /api/sync/model-config 一个字都不用改 —— 上行写进去的，下行原样读出来。
+//
+// base_version 做 CAS：班管改的是他读到的那一版，若这期间云端被别人改过
+// （比如平台运营者推了新配置），返回 409 让本机提示「已被改动，请刷新」。
+// 没有这个，两个班同时改会静默覆盖，而覆盖掉的是全校都在用的配置。
+//
+// body: { base_version, class_user_id, class_admin, config:{models,sources,meta} }
+// ------------------------------------------------------------
+app.post('/api/sync/policy', requireNode, function(req, res) {
+  var seat = checkSeat(req);
+  if (!seat.ok) {
+    return res.status(seat.code).json({ code: seat.code, message: seat.reason });
+  }
+
+  var b = req.body || {};
+  var doc = b.config;
+  if (!doc || typeof doc !== 'object' || !Array.isArray(doc.models)) {
+    return res.status(400).json({ code: 400, message: 'config 必须是对象且含 models 数组' });
+  }
+  for (var i = 0; i < doc.models.length; i++) {
+    var m = doc.models[i] || {};
+    if (!m.id || !m.label) {
+      return res.status(400).json({ code: 400, message: 'models[' + i + '] 缺少 id 或 label' });
+    }
+  }
+  if (!Array.isArray(doc.sources)) doc.sources = [];
+  if (!doc.meta || typeof doc.meta !== 'object') doc.meta = {};
+
+  var current = parseInt(getMeta('model_config_version', '0'), 10) || 0;
+  var baseVersion = (b.base_version === undefined || b.base_version === null) ? current : (parseInt(b.base_version, 10) || 0);
+  if (baseVersion !== current) {
+    return res.status(409).json({
+      code: 409,
+      message: '云端配置已被改动（你基于 v' + baseVersion + ' 编辑，当前已是 v' + current + '），请刷新后重新修改',
+      data: { model_config_version: current }
+    });
+  }
+
+  var version = 0;
+  var tx = db.transaction(function() {
+    setMeta('model_config', JSON.stringify({
+      models: doc.models,
+      sources: doc.sources,
+      meta: doc.meta
+    }));
+    version = bumpMeta('model_config_version');
+  });
+  tx();
+
+  console.log('[Sync] 席位班 %s 上行模型配置: v%s（%d 个模型）by %s',
+    req.nodeInstance, version, doc.models.length, seat.binding.admin_username);
+  res.json({
+    code: 200,
+    message: '已同步到全校，各班会在 1 分钟内自动更新',
+    data: { model_config_version: version }
+  });
+});
+
+// ------------------------------------------------------------
+// 配置上行写 · 第二节：积分分配
+//
+// 语义与云端网页 /api/my/topup 一致：**总额覆盖**，不是追加。本机管理台
+// 原本是累加（PUT /admin/users/:userId/quota），两端口径相反会让账对不上，
+// 所以这里以本机推上来的 allocated_micro 绝对值为准。
+//
+// idem_key 去重：本机重试（断网、网关超时）不会重复记账 —— 这是
+// credit_log.idem_key UNIQUE 这个索引本来就该有、却一直没被用上的能力。
+//
+// body: { base_version, class_user_id, class_admin, items:[{user_id, allocated_micro, weekly_quota_micro, reason, idem_key}] }
+// ------------------------------------------------------------
+app.post('/api/sync/allocations', requireNode, function(req, res) {
+  var seat = checkSeat(req);
+  if (!seat.ok) {
+    return res.status(seat.code).json({ code: seat.code, message: seat.reason });
+  }
+
+  var b = req.body || {};
+  var items = Array.isArray(b.items) ? b.items : [];
+  if (!items.length) return res.status(400).json({ code: 400, message: '没有要同步的分配项' });
+  if (items.length > 500) return res.status(400).json({ code: 400, message: '单次最多同步 500 条' });
+
+  var current = parseInt(getMeta('assign_version', '0'), 10) || 0;
+  var baseVersion = (b.base_version === undefined || b.base_version === null) ? current : (parseInt(b.base_version, 10) || 0);
+  if (baseVersion !== current) {
+    return res.status(409).json({
+      code: 409,
+      message: '云端额度已被改动（你基于 v' + baseVersion + ' 编辑，当前已是 v' + current + '），请刷新后重新修改',
+      data: { assign_version: current }
+    });
+  }
+
+  var applied = 0, skipped = 0, touched = false;
+  var now = nowIso();
+  var operator = seat.binding.admin_username;
+  var self = seat.binding.class_user_id;
+
+  var tx = db.transaction(function() {
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i] || {};
+      var userId = String(it.user_id || '').trim().slice(0, 40);
+      if (!userId) { skipped++; continue; }
+
+      // 幂等：同一个 idem_key 已经入过账就跳过（重试不会双记）
+      var idemKey = String(it.idem_key || '').trim().slice(0, 64);
+      if (idemKey && db.prepare('SELECT id FROM credit_log WHERE idem_key = ?').get(idemKey)) {
+        skipped++;
+        continue;
+      }
+
+      // 别的学校的学号不能通过「本机改过」这条路塞进来
+      var owner = db.prepare('SELECT org_id FROM allocations WHERE user_id = ?').get(userId);
+      if (owner && owner.org_id !== req.nodeOrg) { skipped++; continue; }
+
+      var allocated = Math.max(0, Math.round(Number(it.allocated_micro) || 0));
+      var weekly = Math.max(0, Math.round(Number(it.weekly_quota_micro) || 0));
+      var before = db.prepare('SELECT allocated_micro FROM allocations WHERE user_id = ? AND org_id = ?').get(userId, req.nodeOrg);
+      var prevMicro = before ? before.allocated_micro : 0;
+
+      db.prepare([
+        'INSERT INTO allocations (user_id, org_id, allocated_micro, weekly_quota_micro, assigned_by, updated_at)',
+        'VALUES (?, ?, ?, ?, ?, ?)',
+        'ON CONFLICT(user_id, org_id) DO UPDATE SET allocated_micro = excluded.allocated_micro,',
+        '  weekly_quota_micro = excluded.weekly_quota_micro, assigned_by = excluded.assigned_by,',
+        '  updated_at = excluded.updated_at'
+      ].join('\n')).run(userId, req.nodeOrg, allocated, weekly, operator, now);
+
+      var delta = allocated - prevMicro;
+      if (delta !== 0) {
+        db.prepare([
+          'INSERT INTO credit_log (org_id, user_id, amount_micro, kind, reason, operator, idem_key, created_at)',
+          'VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        ].join('\n')).run(
+          req.nodeOrg, userId, delta, 'adjust',
+          String(it.reason || '班管在本机调整') + '（来自 ' + req.nodeInstance + '，操作人 ' + operator + (self ? ' / ' + self : '') + '）',
+          operator, idemKey || null, now
+        );
+      }
+      applied++;
+      touched = true;
+    }
+    if (touched) bumpMeta('assign_version');
+  });
+  tx();
+
+  console.log('[Sync] 席位班 %s 上行额度: %d 条生效、%d 条跳过 by %s（学校 %s）',
+    req.nodeInstance, applied, skipped, operator, req.nodeOrg);
+  res.json({
+    code: 200,
+    message: applied ? ('已同步到全校（' + applied + ' 人）') : '没有需要同步的变更',
+    data: {
+      assign_version: parseInt(getMeta('assign_version', '0'), 10),
+      applied: applied,
+      skipped: skipped
+    }
+  });
 });
 
 // ------------------------------------------------------------
