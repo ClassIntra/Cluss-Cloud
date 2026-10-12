@@ -222,11 +222,21 @@ function viewGuest() {
         '<div class="cred-row"><div><div class="tiny muted">学校编号</div><div class="cred-value mono">' + esc(regResult.org_id) + '</div></div><button class="btn btn-ghost btn-sm" data-copy="' + esc(regResult.org_id) + '">复制</button></div>' +
         '<div class="cred-row"><div><div class="tiny muted">管理员用户名</div><div class="cred-value mono">' + esc(regResult.username) + '</div></div><button class="btn btn-ghost btn-sm" data-copy="' + esc(regResult.username) + '">复制</button></div>' +
         '<div class="cred-row"><div><div class="tiny muted">接入密钥</div><div class="cred-value mono">' + esc(regResult.org_secret) + '</div></div><button class="btn btn-ghost btn-sm" data-copy="' + esc(regResult.org_secret) + '">复制</button></div>' +
-        '<div style="margin:14px 0 8px" class="tiny muted">部署设备的 <code>server/.env</code>（整块复制即可，无需背记）</div>' +
+        '<div class="cred-row"><div><div class="tiny muted">第一台设备的实例号</div><div class="cred-value mono">' + esc(regResult.instance_id || 'class-01') + '</div></div><button class="btn btn-ghost btn-sm" data-copy="' + esc(regResult.instance_id || 'class-01') + '">复制</button></div>' +
+        '<div style="margin:14px 0 8px" class="tiny muted">粘到<b>教室电脑</b>的 <code>server/.env</code>（每台设备一份，整块复制）</div>' +
         '<pre class="env-block">' + esc(regResult.env_template) + '</pre>' +
+        '<div class="alert alert-info" style="margin-top:12px">' +
+          '<b>接第二台设备时</b>：把上面 .env 里的 <code>CLUSS_INSTANCE_ID</code> 改成不同的值再粘一份（比如末尾 01 改成 02）。' +
+          '两台用同一个值会挤进同一条节点记录 —— 用量混在一起、吊销时一起被拒，而且 2 班在面板上会消失。' +
+        '</div>' +
         '<div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">' +
           '<button class="btn" data-copy="' + esc(regResult.env_template) + '">复制整块 .env</button>' +
           '<button class="btn btn-ghost" id="btn-go-login">登录我的学校 →</button>' +
+        '</div>' +
+        '<div class="alert alert-warning" style="margin-top:14px">' +
+          '<b>接完之后还有一步</b>：登录看板 → 点「账号绑定」页签 → 在教室电脑上用班管账号登录管理台，' +
+          '点「生成确认码」，把码粘回网页确认。<b>绑定的那个班就是管理员席位</b>：只有它的班管能在本机改模型配置和积分分配，改完自动同步全校；' +
+          '其他班只能查看。一个学校只能有一个席位，换人要先解绑。' +
         '</div>' +
       '</section>';
   } else {
@@ -310,7 +320,7 @@ function bindGuest() {
 var regResultUsername = '';
 
 // ---------- 学校看板 ----------
-var dash = { loaded: false, data: null, students: [], logs: [] };
+var dash = { loaded: false, data: null, students: [], logs: [], admins: [] };
 function viewDash() {
   var d = dash.data;
   var html =
@@ -335,7 +345,38 @@ function viewDash() {
 
   html += '<div class="seg" role="tablist">' +
     segBtn('nodes', '班级节点', d.nodes.length) + segBtn('ledger', '额度台账', dash.students.length) +
-    segBtn('logs', '额度流水') + segBtn('bind', '账号绑定') + '</div>';
+    segBtn('logs', '额度流水') + segBtn('bind', '账号绑定') + segBtn('admins', '管理员账号') + '</div>';
+
+  // 没绑席位就直接摆在默认页上，而不是让人自己点「账号绑定」才发现：
+  // 没席位 = 本校没人能在教室电脑上改配置，这是最需要被看见的一件事。
+  if (!d.admin_binding && state.activeTab !== 'bind') {
+    html += '<div class="alert alert-warning">本校还没有认领管理员席位。' +
+      '席位决定谁能在教室电脑上改模型配置和积分分配 —— <button class="btn btn-ghost btn-sm" data-tab="bind">去绑定 →</button></div>';
+  }
+
+  if (state.activeTab === 'admins') {
+    html += '<section class="card"><div class="card-head"><h2>管理员账号</h2></div>' +
+      '<p class="tiny muted" style="margin-top:0">一个学校可以有多个管理员账号。交接时把新管理员加进来、验证能登录，再把旧的删掉 —— ' +
+      '不用改数据库。删不掉最后一个，否则没人能登录。</p>' +
+      (dash.admins && dash.admins.length > 1
+        ? '<div class="alert alert-warning tiny">交接建议：先加新账号 → 让接班人用新账号登录确认 → 再删旧账号。' +
+          '如果旧账号占着管理员席位，先到「账号绑定」页签解绑，否则新账号没有写入权。</div>'
+        : '') +
+      '<div class="table-scroll"><table><thead><tr><th>用户名</th><th>创建时间</th><th>操作</th></tr></thead><tbody>' +
+      ((dash.admins || []).map(function(a) {
+        return '<tr><td class="mono">' + esc(a.username) + '</td>' +
+          '<td class="muted">' + esc(a.created_at || '—') + '</td>' +
+          '<td><button class="btn btn-ghost btn-sm" data-pwduser="' + esc(a.username) + '">改密码</button>' +
+          (dash.admins.length > 1 ? '<button class="btn btn-ghost btn-sm danger-text" data-deladmin="' + esc(a.username) + '">删除</button>' : '') +
+          '</td></tr>';
+      }).join('') || '<tr><td colspan="3" class="muted">加载中…</td></tr>') +
+      '</tbody></table></div>' +
+      '<form class="topup-form" id="f-add-admin" style="margin-top:12px">' +
+        '<input class="input" name="username" placeholder="新管理员用户名" autocapitalize="off" spellcheck="false">' +
+        '<input class="input" name="password" type="password" placeholder="密码（至少 8 位）">' +
+        '<button class="btn" type="submit">添加管理员</button>' +
+      '</form><div id="add-admin-msg"></div></section>';
+  }
 
   if (state.activeTab === 'bind') {
     var b = d.admin_binding;
@@ -457,8 +498,40 @@ function bindDash() {
     b.addEventListener('click', function() {
       state.activeTab = b.getAttribute('data-tab');
       if (state.activeTab === 'bind') loadBindings();
+      if (state.activeTab === 'admins') loadAdmins();
       render();
     });
+  });
+
+  // ---- 管理员账号管理 ----
+  app.querySelectorAll('[data-pwduser]').forEach(function(b) {
+    b.addEventListener('click', function() {
+      var u = b.getAttribute('data-pwduser');
+      var pw = prompt('给「' + u + '」设置新密码（至少 8 位）：');
+      if (!pw) return;
+      api('PUT', '/my/admins/' + encodeURIComponent(u) + '/password', { password: pw })
+        .then(function(d) { alert(d.message || '已更新'); loadAdmins(); })
+        .catch(function(e) { alert('失败：' + e.message); });
+    });
+  });
+  app.querySelectorAll('[data-deladmin]').forEach(function(b) {
+    b.addEventListener('click', function() {
+      var u = b.getAttribute('data-deladmin');
+      if (!window.confirm('删除管理员「' + u + '」？\n如果这个账号正占着管理员席位，会一并解绑——新管理员需要重新认领。')) return;
+      api('DELETE', '/my/admins/' + encodeURIComponent(u))
+        .then(function(d) { alert(d.message || '已删除'); loadAdmins(); loadDash(); })
+        .catch(function(e) { alert('失败：' + e.message); });
+    });
+  });
+  var fAdd = document.getElementById('f-add-admin');
+  if (fAdd) fAdd.addEventListener('submit', function(e) {
+    e.preventDefault();
+    var msg = document.getElementById('add-admin-msg');
+    var fd = new FormData(fAdd);
+    msg.innerHTML = '';
+    api('POST', '/my/admins', { username: fd.get('username'), password: fd.get('password') })
+      .then(function(d) { msg.innerHTML = '<span class="ok-text">' + esc(d.message) + '</span>'; fAdd.reset(); loadAdmins(); })
+      .catch(function(err) { msg.innerHTML = '<span class="danger-text">' + esc(err.message) + '</span>'; });
   });
   app.querySelectorAll('[data-copy]').forEach(function(b) {
     b.addEventListener('click', function() { copyText(b.getAttribute('data-copy'), b); });
@@ -535,8 +608,13 @@ function bindDash() {
   }
 }
 function loadBindings() {
-  api('GET', '/my/bindings').then(function(d) {
+api('GET', '/my/bindings').then(function(d) {
     dash.pending = d.pending; render();
+  }).catch(function() {});
+}
+function loadAdmins() {
+  api('GET', '/my/admins').then(function(d) {
+    dash.admins = d.admins || []; render();
   }).catch(function() {});
 }
 function loadDash() {
@@ -586,10 +664,10 @@ function viewPlatform() {
         '<td><button class="btn btn-ghost btn-sm ' + (o.status === 'active' ? 'btn-danger' : '') + '" data-org="' + esc(o.id) + '" data-act="' + (o.status === 'active' ? 'disable' : 'enable') + '">' +
           (o.status === 'active' ? '停用' : '启用') + '</button>' +
           '<button class="btn btn-ghost btn-sm" data-orgkey="' + esc(o.id) + '">密钥</button></td></tr>';
-    }).join('') + '</tbody></table></div></section>';
+    }).join('') || '<tr><td colspan="8" class="muted">还没有学校注册。</td></tr>' + '</tbody></table></div></section>';
 
       var curModelV = plat.mcVersion;
-      html += '<section class="card"><div class="card-head"><h2>接入节点</h2><span class="tiny muted">全网 ' + d.nodes.length + ' 个 · 当前策略 v' + curModelV + '</span></div><div class="table-scroll"><table>' +
+      html += '<section class="card"><div class="card-head"><h2>接入节点</h2><span class="tiny muted">全网 ' + d.nodes.length + ' 个 · 当前策略 v' + curModelV + '</span></div><div class="table-scroll"><table>' +'</span></div><div class="table-scroll"><table>' +
     '<thead><tr><th>实例</th><th>学校</th><th>备注</th><th>状态</th><th>策略版本</th><th>最后上报</th></tr></thead><tbody>' +
     d.nodes.map(function(n) {
       var behind = curModelV > 0 && n.status === 'active' && n.last_model_version < curModelV;
@@ -597,7 +675,8 @@ function viewPlatform() {
         '<td>' + (n.status === 'revoked' ? '<span class="badge badge-danger">吊销</span>' : (n.online ? '<span class="badge badge-ok">在线</span>' : '<span class="badge badge-warn">失联</span>')) + '</td>' +
         '<td>' + (behind ? '<span class="badge badge-warn">v' + n.last_model_version + ' 落后</span>' : '<span class="badge badge-ok">v' + n.last_model_version + '</span>') + '</td>' +
         '<td class="muted tiny">' + (n.last_report_at ? relTime(n.last_report_at) : '从未') + '</td></tr>';
-    }).join('') + '</tbody></table></div></section>';
+    }).join('') || '<tr><td colspan="6" class="muted">还没有班级设备接入。各校管理员注册后会在注册成功页拿到 .env。</td></tr>' + '</tbody></table></div></section>';
+
 
   var mcHtml = '<section class="card"><div class="card-head"><h2>策略下发（模型与计价）</h2>' +
     '<span class="' + (plat.mcVersion > 0 ? 'badge badge-ok' : 'badge badge-warn') + '">当前 v' + plat.mcVersion + (plat.mcVersion > 0 ? '' : '（尚未下发——节点拉到空配置会清空本机模型，务必先发布）') + '</span></div>' +

@@ -78,7 +78,19 @@ db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 db.pragma('busy_timeout = 5000');
 
-db.exec([
+// 建表语句放在数组里交给 SQLite 一次执行；出错时把整段 SQL 落到 stderr，
+// 否则 better-sqlite3 只报 "near X: syntax error" 而不给上下文，排查要靠猜。
+function execSchema(sql) {
+  try {
+    db.exec(sql.join('\n'));
+  } catch (err) {
+    console.error('[Schema] 建表失败: ' + err.message);
+    console.error('[Schema] SQL:\n' + sql.join('\n'));
+    throw err;
+  }
+}
+
+execSchema([
   'CREATE TABLE IF NOT EXISTS orgs (',
   '  id TEXT PRIMARY KEY,',                 // 6 位去混淆字符，本身不是凭证
   '  name TEXT NOT NULL,',
@@ -146,10 +158,18 @@ db.exec([
   '  estimated INTEGER NOT NULL DEFAULT 0,',
   "  source TEXT NOT NULL DEFAULT 'chat',",
   "  trace_id TEXT NOT NULL DEFAULT '',",
-  '  image_count INTEGER NOT NULL DEFAULT 0,',
-  '  created_at TEXT NOT NULL',
+'  image_count INTEGER NOT NULL DEFAULT 0,',
+  '  created_at TEXT NOT NULL,',
+  // 节点侧的本机主键（Cluss/services/sync.js 上报时带 local_id）。
+  // 幂等靠它：节点只在收到 HTTP 200 时才标记已同步，所以「服务端已提交、
+  // 响应在网关丢了」这种最常见的超时场景必然重发，没有唯一约束的话
+  // 学校账单直接翻倍，而且节点随后把本地行标记为已发送、永不自愈。
+  "  local_id INTEGER NOT NULL DEFAULT 0",   // 末列：后面不能再跟逗号
   ');',
   'CREATE INDEX IF NOT EXISTS idx_usage_org ON usage_log(org_id, created_at DESC);',
+  // 同一节点同一 local_id 只能入库一次。org_id 进键，因为不同学校可能
+  // 都用 class-01 这样的实例号，而各校 local_id 是各自本机的自增主键。
+  'CREATE UNIQUE INDEX IF NOT EXISTS ux_usage_local ON usage_log(org_id, origin_instance, local_id) WHERE local_id > 0;',
   // ---- 账号绑定：把「班级里的班管」和「云端学校管理员」认成同一个人 ----
   // 为什么要这张表：接入 CI 后班管在班级设备上就是管理员，在 Cluss-Cloud 上
   // 又是一个独立的管理员账号，两边两套口令、两个人 —— 换届/交接时最容易出岔。
@@ -171,8 +191,11 @@ db.exec([
   // 一个学校只有一个「管理员席位」：别的班也有班管，但全校只能有一个班管
   // 占这个位（DB 层硬保证，不靠代码判断，绕不过去）
   "CREATE UNIQUE INDEX IF NOT EXISTS ux_bind_org ON account_bindings(org_id) WHERE status = 'active';",
-  // 反过来同一个班级账号也不能同时挂到两个云端账号下
-  "CREATE UNIQUE INDEX IF NOT EXISTS ux_bind_seat ON account_bindings(instance_id, class_user_id) WHERE status = 'active';",
+  // 反过来同一个班级账号也不能同时挂到两个云端账号下。
+  // 必须带 org_id：实例号是各校自己编的，两所学校都用 class-01 + 学号 S001
+  // 是极常见的组合，全局唯一索引会让后注册的学校绑不上席位，而错误信息
+  // 还归因成「本校席位已被占用」——管理员永远查不出原因。
+  "CREATE UNIQUE INDEX IF NOT EXISTS ux_bind_seat ON account_bindings(org_id, instance_id, class_user_id) WHERE status = 'active';",
   'CREATE TABLE IF NOT EXISTS bind_requests (',
   '  code TEXT PRIMARY KEY,',                // 一次性确认码（6 位），15 分钟内有效
   '  org_id TEXT NOT NULL REFERENCES orgs(id),',
@@ -194,12 +217,42 @@ db.exec([
   '  updated_at TEXT NOT NULL',
   ');',
   'CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);',
-  'CREATE TABLE IF NOT EXISTS admins (',     // 平台运营者
+'CREATE TABLE IF NOT EXISTS admins (',     // 平台运营者
   '  username TEXT PRIMARY KEY,',
   '  pass_hash TEXT NOT NULL,',
   '  created_at TEXT NOT NULL',
   ');'
+]);
+// 这里没有 migration 版本表（单文件服务，早期取舍），但仍然要给已存在的库补列：
+// CREATE TABLE IF NOT EXISTS 对已建好的表是空操作，新加的列不会自己出现。
+// 每一步都先查再改，所以重复启动是安全的。
+function ensureColumn(table, column, ddl) {
+  var cols = db.prepare('PRAGMA table_info(' + table + ')').all();
+  if (cols.some(function(c) { return c.name === column; })) return false;
+  db.exec(ddl);
+  console.log('[Migrate] 已补列 %s.%s', table, column);
+  return true;
+}
+
+ensureColumn('usage_log', 'local_id', 'ALTER TABLE usage_log ADD COLUMN local_id INTEGER NOT NULL DEFAULT 0');
+db.exec([
+  'CREATE UNIQUE INDEX IF NOT EXISTS ux_usage_local',
+  'ON usage_log(org_id, origin_instance, local_id) WHERE local_id > 0'
 ].join('\n'));
+
+// 旧版 ux_bind_seat 不含 org_id，会让两所学校用同样实例号+学号时互相撞车。
+// CREATE INDEX IF NOT EXISTS 不会改已存在的索引，所以要显式删掉再按新定义建。
+(function migrateBindSeat() {
+  var row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'ux_bind_seat'").get();
+  if (row && row.sql && row.sql.indexOf('org_id') < 0) {
+    db.exec('DROP INDEX ux_bind_seat');
+    db.exec([
+      'CREATE UNIQUE INDEX ux_bind_seat',
+      'ON account_bindings(org_id, instance_id, class_user_id) WHERE status = \'active\''
+    ].join('\n'));
+    console.log('[Migrate] ux_bind_seat 已重建（补上 org_id，避免跨校撞车）');
+  }
+})();
 
 function nowIso() { return new Date().toISOString(); }
 
@@ -214,6 +267,21 @@ function setMeta(key, value) {
 function bumpMeta(name) {
   var next = (parseInt(getMeta(name, '0'), 10) || 0) + 1;
   setMeta(name, next);
+  return next;
+}
+
+// ---- 按校隔离的版本号 ----
+// 额度分配和模型配置的上行写都带 base_version 做 CAS，而 CAS 必须按校比：
+// 全局单值的话，B 校管理员在网页上充个值，A 校班管本机的改动下一次推送
+// 就被 409 掉（而 A 校压根没碰过 B 的数据）。更糟的是重复充值同一个值
+// 也会 bump 版本，于是「点错了两次」能让全校所有席位班管的本机改动全部失败。
+function orgVersion(orgId, kind) {
+  var row = db.prepare('SELECT value FROM meta WHERE key = ?').get('ver:' + kind + ':' + orgId);
+  return row ? (parseInt(row.value, 10) || 0) : 0;
+}
+function bumpOrgVersion(orgId, kind) {
+  var next = orgVersion(orgId, kind) + 1;
+  setMeta('ver:' + kind + ':' + orgId, next);
   return next;
 }
 
@@ -453,6 +521,18 @@ app.post('/api/org/register', function(req, res) {
   console.log('[Org] 新学校注册: %s（%s），管理员 %s', orgId, schoolName, username);
 
   var base = PUBLIC_BASE_URL || (req.protocol + '://' + (req.get('host') || 'cloud.example'));
+
+  // 实例号带学校编号前缀，不写死 class-01。
+  //
+  // 写死的害处有两层（都实测过）：
+  //   · 同校第二个班照抄 → nodes 表主键是 (instance_id, org_id)，两个班挤进
+  //     同一行，用量混在一起、吊销时两个班一起被拒，而且 2 班在面板上直接消失；
+  //   · 两所学校照抄 → account_bindings 的 ux_bind_seat 是全局唯一索引，
+  //     后注册的学校绑不上管理员席位，错误信息还归因成「本校席位已被占用」。
+  var instanceId = orgId.toLowerCase() + '-class-01';
+  var sameOrg = db.prepare('SELECT COUNT(*) AS c FROM nodes WHERE org_id = ?').get(orgId).c;
+  if (sameOrg > 0) instanceId = orgId.toLowerCase() + '-class-0' + (sameOrg + 1);
+
   res.json({
     code: 200, message: '注册成功',
     data: {
@@ -461,9 +541,12 @@ app.post('/api/org/register', function(req, res) {
       username: username,
       org_secret: orgSecret, // 只显示这一次
       relay_url: base,
+      // 每台教室电脑的实例号必须不同。下一台设备接入时把这行改一下
+      // （比如 …-class-02），否则两个班会挤进同一条节点记录。
+      instance_id: instanceId,
       env_template: [
         'CLUSS_MODE=node',
-        'CLUSS_INSTANCE_ID=class-01',
+        'CLUSS_INSTANCE_ID=' + instanceId,
         'CLUSS_RELAY_URL=' + base,
         'CLUSS_ORG_ID=' + orgId,
         'CLUSS_SHARED_SECRET=' + orgSecret
@@ -599,8 +682,8 @@ app.get('/api/my/overview', requireWeb, requireOrgAdmin, function(req, res) {
     code: 200, message: 'ok',
     data: {
       org: { id: req.org.id, name: req.org.name, region: req.org.region },
-      assign_version: parseInt(getMeta('assign_version', '0'), 10) || 0,
-      model_config_version: parseInt(getMeta('model_config_version', '0'), 10) || 0,
+      assign_version: orgVersion(req.org.id, 'assign'),
+      model_config_version: orgVersion(req.org.id, 'model'),
       online_window_sec: NODE_ONLINE_WINDOW_SEC,
       admin_binding: myBinding(orgId),
       nodes: nodes,
@@ -698,7 +781,7 @@ app.post('/api/my/topup', requireWeb, requireOrgAdmin, function(req, res) {
         'VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
       ].join('\n')).run(req.org.id, userId, delta, 'topup', String(b.reason || '充值'), req.auth.name, idemKey, now);
     }
-    bumpMeta('assign_version');
+    bumpOrgVersion(req.org.id, 'assign');
   });
   tx();
 
@@ -709,7 +792,7 @@ app.post('/api/my/topup', requireWeb, requireOrgAdmin, function(req, res) {
     code: 200,
     message: '额度已设为 ¥' + amountYuan + '，各班节点将在 1 分钟内同步',
     data: {
-      assign_version: parseInt(getMeta('assign_version', '0'), 10),
+      assign_version: orgVersion(req.org.id, 'assign'),
       user_id: userId,
       allocated_micro: allocated,
       previous_micro: previousMicro
@@ -888,6 +971,69 @@ app.delete('/api/my/binding', requireWeb, requireOrgAdmin, function(req, res) {
 });
 
 // ------------------------------------------------------------
+// 学校管理员的增删改
+// ------------------------------------------------------------
+// 为什么必须有：账号绑定的卖点是「换届交接只传一个身份」，但原来全校只能建
+// 一个管理员、密码无处可改、账号删不掉 —— 交接之后新管理员的密码仍然没地方设，
+// 只能改数据库文件。组织内一班一台设备，接入三年总要换人。
+var USERNAME_RE = /^[a-z0-9_-]{3,30}$/;
+
+app.get('/api/my/admins', requireWeb, requireOrgAdmin, function(req, res) {
+  var rows = db.prepare(
+    'SELECT id, username, created_at FROM org_admins WHERE org_id = ? ORDER BY created_at'
+  ).all(req.org.id);
+  res.json({ code: 200, message: 'ok', data: { admins: rows } });
+});
+
+app.post('/api/my/admins', requireWeb, requireOrgAdmin, function(req, res) {
+  var b = req.body || {};
+  var username = String(b.username || '').trim().toLowerCase();
+  var password = String(b.password || '');
+  if (!USERNAME_RE.test(username)) {
+    return res.status(400).json({ code: 400, message: '用户名只能用 3-30 位小写字母、数字、下划线、短横线' });
+  }
+  if (password.length < 8) {
+    return res.status(400).json({ code: 400, message: '密码至少 8 位' });
+  }
+  // 用户名是全局唯一（历史设计），撞了要说清是谁的
+  var dup = db.prepare('SELECT org_id FROM org_admins WHERE username = ?').get(username);
+  if (dup) {
+    return res.status(409).json({ code: 409, message: '该用户名已被占用，换一个' });
+  }
+  db.prepare('INSERT INTO org_admins (org_id, username, pass_hash, created_at) VALUES (?, ?, ?, ?)')
+    .run(req.org.id, username, hashPassword(password), nowIso());
+  console.log('[Org] 新增管理员: 学校 %s ← %s（操作人 %s）', req.org.id, username, req.auth.name);
+  res.json({ code: 200, message: '已添加 ' + username });
+});
+
+app.put('/api/my/admins/:username/password', requireWeb, requireOrgAdmin, function(req, res) {
+  var username = String(req.params.username || '').trim().toLowerCase();
+  var password = String((req.body || {}).password || '');
+  if (password.length < 8) return res.status(400).json({ code: 400, message: '密码至少 8 位' });
+  var row = db.prepare('SELECT * FROM org_admins WHERE username = ? AND org_id = ?').get(username, req.org.id);
+  if (!row) return res.status(404).json({ code: 404, message: '本校没有这个管理员账号' });
+  db.prepare('UPDATE org_admins SET pass_hash = ? WHERE id = ?').run(hashPassword(password), row.id);
+  console.log('[Org] 管理员改密: 学校 %s / %s（操作人 %s）', req.org.id, username, req.auth.name);
+  res.json({ code: 200, message: '密码已更新' });
+});
+
+app.delete('/api/my/admins/:username', requireWeb, requireOrgAdmin, function(req, res) {
+  var username = String(req.params.username || '').trim().toLowerCase();
+  var row = db.prepare('SELECT * FROM org_admins WHERE username = ? AND org_id = ?').get(username, req.org.id);
+  if (!row) return res.status(404).json({ code: 404, message: '本校没有这个管理员账号' });
+  var n = db.prepare('SELECT COUNT(*) AS c FROM org_admins WHERE org_id = ?').get(req.org.id).c;
+  if (n <= 1) {
+    return res.status(400).json({ code: 400, message: '本校至少要留一个管理员，否则没人能登录' });
+  }
+  // 席位指向被删账号的话一并清掉，否则节点还会按老账号名推配置被拒
+  db.prepare("UPDATE account_bindings SET status = 'released', released_at = ? WHERE admin_username = ? AND org_id = ? AND status = 'active'")
+    .run(nowIso(), username, req.org.id);
+  db.prepare('DELETE FROM org_admins WHERE id = ?').run(row.id);
+  console.log('[Org] 删除管理员: 学校 %s / %s（操作人 %s）', req.org.id, username, req.auth.name);
+  res.json({ code: 200, message: '已删除 ' + username });
+});
+
+// ------------------------------------------------------------
 // 平台运营者视角（/api/platform/*）
 // ------------------------------------------------------------
 app.get('/api/platform/overview', requireWeb, requirePlatform, function(req, res) {
@@ -993,7 +1139,10 @@ app.put('/api/platform/orgs/:orgId/model-key', requireWeb, requirePlatform, func
     'INSERT INTO org_model_keys (org_id, api_key, updated_at) VALUES (?, ?, ?)',
     'ON CONFLICT(org_id) DO UPDATE SET api_key = excluded.api_key, updated_at = excluded.updated_at'
   ].join('\n')).run(req.params.orgId, apiKey, nowIso().replace('T', ' ').slice(0, 19));
-  bumpMeta('model_config_version'); // 让节点尽快拉到
+  db.prepare("SELECT id FROM orgs WHERE status = 'active'").all().forEach(function(o) {
+    bumpOrgVersion(o.id, 'model'); // 让该校的节点尽快拉到
+  });
+  bumpMeta('model_config_version');
   console.log('[Platform] 学校 %s 的模型密钥已%s', req.params.orgId, apiKey ? '更新' : '清空');
   res.json({ code: 200, message: apiKey ? '已下发，该校节点会在 1 分钟内同步' : '已清空' });
 });
@@ -1043,7 +1192,7 @@ app.post('/api/sync/policy', requireNode, function(req, res) {
   if (!Array.isArray(doc.sources)) doc.sources = [];
   if (!doc.meta || typeof doc.meta !== 'object') doc.meta = {};
 
-  var current = parseInt(getMeta('model_config_version', '0'), 10) || 0;
+  var current = orgVersion(req.nodeOrg, 'model');
   var baseVersion = (b.base_version === undefined || b.base_version === null) ? current : (parseInt(b.base_version, 10) || 0);
   if (baseVersion !== current) {
     return res.status(409).json({
@@ -1060,7 +1209,7 @@ app.post('/api/sync/policy', requireNode, function(req, res) {
       sources: doc.sources,
       meta: doc.meta
     }));
-    version = bumpMeta('model_config_version');
+    version = bumpOrgVersion(req.nodeOrg, 'model');
   });
   tx();
 
@@ -1096,7 +1245,7 @@ app.post('/api/sync/allocations', requireNode, function(req, res) {
   if (!items.length) return res.status(400).json({ code: 400, message: '没有要同步的分配项' });
   if (items.length > 500) return res.status(400).json({ code: 400, message: '单次最多同步 500 条' });
 
-  var current = parseInt(getMeta('assign_version', '0'), 10) || 0;
+  var current = orgVersion(req.nodeOrg, 'assign');
   var baseVersion = (b.base_version === undefined || b.base_version === null) ? current : (parseInt(b.base_version, 10) || 0);
   if (baseVersion !== current) {
     return res.status(409).json({
@@ -1155,7 +1304,7 @@ app.post('/api/sync/allocations', requireNode, function(req, res) {
       applied++;
       touched = true;
     }
-    if (touched) bumpMeta('assign_version');
+    if (touched) bumpOrgVersion(req.nodeOrg, 'assign');
   });
   tx();
 
@@ -1165,7 +1314,7 @@ app.post('/api/sync/allocations', requireNode, function(req, res) {
     code: 200,
     message: applied ? ('已同步到全校（' + applied + ' 人）') : '没有需要同步的变更',
     data: {
-      assign_version: parseInt(getMeta('assign_version', '0'), 10),
+      assign_version: orgVersion(req.nodeOrg, 'assign'),
       applied: applied,
       skipped: skipped
     }
@@ -1239,8 +1388,8 @@ app.get('/api/sync/version', requireNode, function(req, res) {
     code: 200, message: 'ok',
     data: {
       instance_id: INSTANCE_ID,
-      assign_version: parseInt(getMeta('assign_version', '0'), 10) || 0,
-      model_config_version: parseInt(getMeta('model_config_version', '0'), 10) || 0,
+      assign_version: orgVersion(req.nodeOrg, 'assign'),
+      model_config_version: orgVersion(req.nodeOrg, 'model'),
       is_seat_admin: !!(seat && seat.instance_id === req.nodeInstance),
       seat_instance: seat ? seat.instance_id : '',
       server_time: nowIso().replace('T', ' ').slice(0, 19)
@@ -1259,7 +1408,7 @@ app.get('/api/sync/assignments', requireNode, function(req, res) {
   res.json({
     code: 200, message: 'ok',
     data: {
-      assign_version: parseInt(getMeta('assign_version', '0'), 10) || 0,
+      assign_version: orgVersion(req.nodeOrg, 'assign'),
       assignments: rows
     }
   });
@@ -1301,39 +1450,67 @@ app.post('/api/sync/usage', requireNode, function(req, res) {
   if (records.length > 500) return res.status(400).json({ code: 400, message: '单次上报最多 500 条' });
 
   var ALLOWED_SOURCES = ['chat', 'study', 'solve', 'grade', 'vision_relay'];
-  var insert = db.prepare([
-    'INSERT INTO usage_log (org_id, origin_instance, user_id, conversation_id, model_id,',
+  // 幂等查询：节点重发同一批时靠它挡掉（键 = org + 实例 + 节点本机主键）。
+  // 节点只有收到 200 才会标记本地已同步，所以「已提交但响应丢了」必然重发。
+  var existsStmt = db.prepare(
+    'SELECT 1 FROM usage_log WHERE org_id = ? AND origin_instance = ? AND local_id = ? AND local_id > 0'
+  );
+  // 单条落库。INSERT OR IGNORE 兜住并发下的唯一约束冲突（两个请求同时到达）。
+  var insertOne = db.prepare([
+    'INSERT OR IGNORE INTO usage_log (org_id, origin_instance, user_id, conversation_id, model_id,',
     '  prompt_tokens, completion_tokens, cache_hit_tokens, cache_miss_tokens, total_tokens,',
-    '  cost_micro, estimated, source, trace_id, image_count, created_at)',
-    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    '  cost_micro, estimated, source, trace_id, image_count, created_at, local_id)',
+    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
   ].join('\n'));
 
-  var accepted = 0;
+  // 数字字段的兜底：Number('abc') 是 NaN，better-sqlite3 遇到 NaN 会抛，
+  // 整个批次的用量全丢 —— 一条脏数据害一整批。负数也直接丢掉。
+  function numOf(v) {
+    var n = Number(v);
+    if (!isFinite(n) || n < 0) return 0;
+    return Math.round(n);
+  }
+
+  var accepted = 0, duplicated = 0, rejected = 0;
   var tx = db.transaction(function() {
     for (var i = 0; i < records.length; i++) {
       var r = records[i] || {};
-      if (!r.user_id) continue;
+      if (!r.user_id) { rejected++; continue; }
       var src = String(r.source || 'chat');
       if (ALLOWED_SOURCES.indexOf(src) < 0) src = 'chat';
-      insert.run(
+      var localId = numOf(r.local_id);
+
+      if (localId > 0 && existsStmt.get(req.nodeOrg, instanceId, localId)) { duplicated++; continue; }
+
+      var info = insertOne.run(
         req.nodeOrg, instanceId, String(r.user_id), String(r.conversation_id || ''), String(r.model_id || ''),
-        Number(r.prompt_tokens || 0), Number(r.completion_tokens || 0), Number(r.cache_hit_tokens || 0),
-        Number(r.cache_miss_tokens || 0), Number(r.total_tokens || 0), Number(r.cost_micro || 0),
-        r.estimated ? 1 : 0, src, String(r.trace_id || ''), Number(r.image_count || 0),
-        String(r.created_at || nowIso())
+        numOf(r.prompt_tokens), numOf(r.completion_tokens), numOf(r.cache_hit_tokens),
+        numOf(r.cache_miss_tokens), numOf(r.total_tokens), numOf(r.cost_micro),
+        r.estimated ? 1 : 0, src, String(r.trace_id || ''), numOf(r.image_count),
+        String(r.created_at || nowIso()), localId
       );
-      accepted++;
+      if (info.changes > 0) accepted++; else duplicated++;
     }
   });
   try { tx(); } catch (err) {
-    console.error('[Sync] 用量入库失败:', err.message);
+    console.error('[Sync] 用量入库失败（学校 %s / 节点 %s）:', req.nodeOrg, instanceId, err.message);
     return res.status(500).json({ code: 500, message: '用量入库失败' });
   }
 
   db.prepare('UPDATE nodes SET last_report_at = ? WHERE instance_id = ? AND org_id = ?')
     .run(nowIso(), instanceId, req.nodeOrg);
-  console.log('[Sync] 收到上报: %s（学校 %s），%d 条', instanceId, req.nodeOrg, accepted);
-  res.json({ code: 200, message: 'ok', data: { accepted: accepted } });
+  if (duplicated || rejected) {
+    console.log('[Sync] 收到上报: %s（学校 %s），入库 %d 条，重复 %d 条，丢弃 %d 条',
+      instanceId, req.nodeOrg, accepted, duplicated, rejected);
+  } else {
+    console.log('[Sync] 收到上报: %s（学校 %s），%d 条', instanceId, req.nodeOrg, accepted);
+  }
+  // 把三个数都回传：节点侧要能看出「我发的被丢了几条」，
+  // 全部重复时也仍返回 200 —— 那表示云端已经收过了，重发是成功的。
+  res.json({
+    code: 200, message: 'ok',
+    data: { accepted: accepted, duplicated: duplicated, rejected: rejected }
+  });
 });
 
 // SPA 兜底：极简单页的 hash 路由不需要服务端兜底，但裸访问 / 时给 index
