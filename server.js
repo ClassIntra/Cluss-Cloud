@@ -160,16 +160,16 @@ execSchema([
   "  trace_id TEXT NOT NULL DEFAULT '',",
 '  image_count INTEGER NOT NULL DEFAULT 0,',
   '  created_at TEXT NOT NULL,',
-  // 节点侧的本机主键（Cluss/services/sync.js 上报时带 local_id）。
-  // 幂等靠它：节点只在收到 HTTP 200 时才标记已同步，所以「服务端已提交、
-  // 响应在网关丢了」这种最常见的超时场景必然重发，没有唯一约束的话
-  // 学校账单直接翻倍，而且节点随后把本地行标记为已发送、永不自愈。
+  // 节点侧的本机主键（Cluss/services/sync.js 上报时带 local_id）。新库直接带上；
+  // 老库由下面的 ensureColumn 补。幂等靠它：节点只在收到 HTTP 200 时才标记
+  // 已同步，「服务端已提交、响应在网关丢了」这种教室网络常态必然重发，
+  // 没有唯一约束的话学校账单直接翻倍，而节点随后把本地行标记为已发送、永不自愈。
   "  local_id INTEGER NOT NULL DEFAULT 0",   // 末列：后面不能再跟逗号
   ');',
   'CREATE INDEX IF NOT EXISTS idx_usage_org ON usage_log(org_id, created_at DESC);',
-  // 同一节点同一 local_id 只能入库一次。org_id 进键，因为不同学校可能
-  // 都用 class-01 这样的实例号，而各校 local_id 是各自本机的自增主键。
-  'CREATE UNIQUE INDEX IF NOT EXISTS ux_usage_local ON usage_log(org_id, origin_instance, local_id) WHERE local_id > 0;',
+  // local_id 列与 ux_usage_local 唯一索引都由下面的迁移负责补齐 ——
+  // 已存在的库里 usage_log 早就建好，CREATE TABLE IF NOT EXISTS 是空操作，
+  // 在这里写 CREATE INDEX 会因为列还不存在而让整个服务起不来。
   // ---- 账号绑定：把「班级里的班管」和「云端学校管理员」认成同一个人 ----
   // 为什么要这张表：接入 CI 后班管在班级设备上就是管理员，在 Cluss-Cloud 上
   // 又是一个独立的管理员账号，两边两套口令、两个人 —— 换届/交接时最容易出岔。
