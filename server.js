@@ -1232,12 +1232,17 @@ app.post('/api/sync/bind-request', requireNode, function(req, res) {
 // 同步接口（与 Cluss node 模式逐字段兼容）
 // ------------------------------------------------------------
 app.get('/api/sync/version', requireNode, function(req, res) {
+  // 节点要知道「本班是不是管理员席位」才能在本地决定给不给班管开写入权——
+  // 这个判断以云端为准，本机无权自己认定。
+  var seat = seatBinding(req.nodeOrg);
   res.json({
     code: 200, message: 'ok',
     data: {
       instance_id: INSTANCE_ID,
       assign_version: parseInt(getMeta('assign_version', '0'), 10) || 0,
       model_config_version: parseInt(getMeta('model_config_version', '0'), 10) || 0,
+      is_seat_admin: !!(seat && seat.instance_id === req.nodeInstance),
+      seat_instance: seat ? seat.instance_id : '',
       server_time: nowIso().replace('T', ' ').slice(0, 19)
     }
   });
