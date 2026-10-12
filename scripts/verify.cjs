@@ -86,7 +86,7 @@ function bareHeaders(org, instance) {
 }
 
 function main() {
-  var tokenA, tokenPlatform;
+  var tokenA, tokenPlatform, code1;
 
   return freePort().then(function(port) {
     baseUrl = 'http://127.0.0.1:' + port;
@@ -220,6 +220,95 @@ function main() {
     return http('GET', baseUrl + '/api/sync/version', undefined, nodeHeaders(global.A.org_id, 'class-a1', 1, 1));
   }).then(function(r) {
     ok('恢复后同步正常', r.status === 200);
+
+    section('⑦ 账号绑定：班管 = 学校管理员');
+    // 先把 2 班节点也接进来：另一个班的班管也要来抢席位，这是本节要拦的场景
+    return http('POST', baseUrl + '/api/org/join', {
+      org_id: global.A.org_id, secret: global.A.org_secret,
+      instance_id: 'class-a2', label: '高一2班'
+    });
+  }).then(function(r) {
+    ok('2 班节点接入成功', r.status === 200);
+    return http('POST', baseUrl + '/api/sync/bind-request',
+      { admin_username: 'yzadmin', class_user_id: '100101', class_admin: false },
+      nodeHeaders(global.A.org_id, 'class-a1', 1, 1));
+  }).then(function(r) {
+    ok('非班管发起绑定被拒（403）', r.status === 403, 'status=' + r.status);
+    return http('POST', baseUrl + '/api/sync/bind-request',
+      { admin_username: 'ezadmin', class_user_id: '100101', class_admin: true },
+      nodeHeaders(global.A.org_id, 'class-a1', 1, 1));
+  }).then(function(r) {
+    ok('拿别校管理员用户名发起被拒（403）', r.status === 403, 'status=' + r.status);
+    return http('POST', baseUrl + '/api/sync/bind-request',
+      { admin_username: 'yzadmin', class_user_id: '100101', class_admin: true },
+      nodeHeaders(global.A.org_id, 'class-a1', 1, 1));
+  }).then(function(r) {
+    code1 = r.data.data.bind_code;
+    ok('1 班班管发起成功，拿到 6 位确认码', r.status === 200 && /^[A-HJ-NP-Z2-9]{6}$/.test(code1 || ''), code1);
+    return http('POST', baseUrl + '/api/auth/login', { username: 'ezadmin', password: 'ez-pass-12345' });
+  }).then(function(r) {
+    var tokenBAdmin = r.data.data.token;
+    return http('POST', baseUrl + '/api/my/bind', { code: code1 }, { Authorization: 'Bearer ' + tokenBAdmin });
+  }).then(function(r) {
+    ok('别校管理员拿本校确认码被拒（403）', r.status === 403, 'status=' + r.status);
+    return http('POST', baseUrl + '/api/my/bind', { code: 'ZZZZZZ' }, { Authorization: 'Bearer ' + tokenA });
+  }).then(function(r) {
+    ok('错误确认码 404', r.status === 404, 'status=' + r.status);
+    return http('POST', baseUrl + '/api/my/bind', { code: code1 }, { Authorization: 'Bearer ' + tokenA });
+  }).then(function(r) {
+    ok('管理员确认后绑定成立', r.status === 200 && r.data.data.binding.class_user_id === '100101',
+      JSON.stringify(r.data.data));
+    return http('GET', baseUrl + '/api/my/overview', undefined, { Authorization: 'Bearer ' + tokenA });
+  }).then(function(r) {
+    var ab = r.data.data.admin_binding;
+    ok('概览带出管理员绑定（1 班 + 学号）',
+      ab && ab.instance_id === 'class-a1' && ab.class_user_id === '100101',
+      JSON.stringify(ab));
+    // —— 第二个班的班管也想当管理员：全校只有一个席位 ——
+    return http('POST', baseUrl + '/api/sync/bind-request',
+      { admin_username: 'yzadmin', class_user_id: '100202', class_admin: true },
+      nodeHeaders(global.A.org_id, 'class-a2', 1, 1));
+  }).then(function(r) {
+    var code2 = r.data.data.bind_code;
+    ok('2 班班管也能发起（发起不禁他，禁的是占席位）', r.status === 200 && !!code2);
+    return http('POST', baseUrl + '/api/my/bind', { code: code2 }, { Authorization: 'Bearer ' + tokenA });
+  }).then(function(r) {
+    ok('第二个班管被拒：全校只能有一个班管当管理员（409）', r.status === 409,
+      'status=' + r.status + ' ' + JSON.stringify(r.data));
+    return http('POST', baseUrl + '/api/my/bind', { code: code1 }, { Authorization: 'Bearer ' + tokenA });
+  }).then(function(r) {
+    ok('同一个确认码不能重复使用（409）', r.status === 409, 'status=' + r.status);
+    return http('GET', baseUrl + '/api/my/bindings', undefined, { Authorization: 'Bearer ' + tokenA });
+  }).then(function(r) {
+    ok('绑定状态可查：已有绑定 + 2 班待确认记录',
+      r.data.data.binding && r.data.data.binding.class_user_id === '100101' &&
+      r.data.data.pending.some(function(p) { return p.class_user_id === '100202'; }),
+      JSON.stringify(r.data.data.pending));
+    return http('DELETE', baseUrl + '/api/my/binding', {}, { Authorization: 'Bearer ' + tokenA });
+  }).then(function(r) {
+    ok('解绑成功', r.status === 200);
+    return http('GET', baseUrl + '/api/my/overview', undefined, { Authorization: 'Bearer ' + tokenA });
+  }).then(function(r) {
+    ok('解绑后概览里绑定为空', r.data.data.admin_binding === null, JSON.stringify(r.data.data.admin_binding));
+    // 席位空出来后，换人应当立刻可以（换届交接）
+    return http('POST', baseUrl + '/api/sync/bind-request',
+      { admin_username: 'yzadmin', class_user_id: '100202', class_admin: true },
+      nodeHeaders(global.A.org_id, 'class-a2', 1, 1));
+  }).then(function(r) {
+    var code3 = r.data.data.bind_code;
+    return http('POST', baseUrl + '/api/my/bind', { code: code3 }, { Authorization: 'Bearer ' + tokenA });
+  }).then(function(r) {
+    ok('换届交接：2 班班管接任成功', r.status === 200 && r.data.data.binding.instance_id === 'class-a2',
+      JSON.stringify(r.data.data));
+    return http('POST', baseUrl + '/api/auth/login', { username: ADMIN.username, password: ADMIN.password });
+  }).then(function(r) {
+    var tp = r.data.data.token;
+    return http('GET', baseUrl + '/api/platform/overview', undefined, { Authorization: 'Bearer ' + tp });
+  }).then(function(r) {
+    var orgA = r.data.data.orgs.filter(function(o) { return o.id === global.A.org_id; })[0];
+    ok('平台视图可见各校管理员席位',
+      orgA && orgA.admin_binding && orgA.admin_binding.class_user_id === '100202',
+      JSON.stringify(orgA && orgA.admin_binding));
 
     console.log('\n========================================');
     console.log('结果: ' + pass + ' 通过, ' + fail + ' 失败');

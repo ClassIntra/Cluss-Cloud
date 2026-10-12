@@ -113,6 +113,9 @@ tr:last-child td { border-bottom: none; }
 .topup-form .input { flex: 1 1 140px; min-width: 110px; }
 .preset-row { display: flex; gap: 4px; }
 .empty { text-align: center; padding: 30px 16px; }
+.bind-card { background: var(--accent-soft); border-radius: var(--r-md); padding: 16px; }
+.bind-who { display: flex; gap: 12px; align-items: flex-start; }
+.bind-who .step-num { background: var(--ok-soft); color: var(--ok); flex: none; }
 .empty-icon { font-size: 2rem; margin-bottom: 8px; }
 .ok-text { color: var(--ok); } .warn-text { color: var(--warn); } .danger-text { color: var(--danger); }
 .link { color: var(--accent); cursor: pointer; text-decoration: none; }
@@ -329,7 +332,54 @@ function viewDash() {
     '</div>';
 
   html += '<div class="seg" role="tablist">' +
-    segBtn('nodes', '班级节点', d.nodes.length) + segBtn('ledger', '额度台账', dash.students.length) + segBtn('logs', '额度流水') + '</div>';
+    segBtn('nodes', '班级节点', d.nodes.length) + segBtn('ledger', '额度台账', dash.students.length) +
+    segBtn('logs', '额度流水') + segBtn('bind', '账号绑定') + '</div>';
+
+  if (state.activeTab === 'bind') {
+    var b = d.admin_binding;
+    html += '<section class="card"><div class="card-head"><h2>账号绑定</h2>' +
+      (b ? '<span class="badge badge-ok">已绑定</span>' : '<span class="badge badge-warn">未绑定</span>') + '</div>';
+
+    if (b) {
+      html +=
+        '<div class="bind-card">' +
+          '<div class="bind-who"><span class="step-num">✓</span><div><b>你就是这个班的班管本人</b>' +
+            '<div class="tiny muted" style="margin-top:4px">班级管理员账号「' + esc(b.admin_username) + '」已与 ' +
+              esc(b.node_label || b.instance_id) + ' 的学号 <b class="mono">' + esc(b.class_user_id) + '</b> 绑定。' +
+              '以后额度流水、审计记录都落在这个名字上，不再是两套身份。</div></div></div>' +
+          '<div class="tiny muted" style="margin-top:14px">绑定于 ' + shortTime(b.bound_at) +
+            ' · ' + esc(b.node_label || b.instance_id) + '（' + esc(b.instance_id) + '）' +
+            (b.node_status === 'active' ? '' : ' · <span class="danger-text">该节点已被吊销</span>') + '</div>' +
+          '<div style="margin-top:14px"><button class="btn btn-ghost btn-danger btn-sm" id="btn-unbind">解绑</button></div>' +
+        '</div>';
+    } else {
+      html +=
+        '<p class="tiny muted" style="margin-top:0">把「云端管理员」和「班级里的班管」认成同一个人——以后换届交接只有一个身份要传。' +
+        '一个学校<b>只能有一个班管</b>占管理员席位：别的班管发起绑定时会看到席位已被占用。</p>' +
+        '<ol class="steps" style="margin-bottom:16px">' +
+          '<li class="step-card"><span class="step-num">1</span><div><b>在班级设备上发起</b></div><div class="tiny muted">用班管账号登录那台教室电脑 → 管理台 → 「Cluss-Cloud 绑定」→ 填本管理员用户名并生成确认码</div></li>' +
+          '<li class="step-card"><span class="step-num">2</span><div><b>回到这里输入确认码</b></div><div class="tiny muted">确认码 15 分钟内有效、只能用一次</div></li>' +
+        '</ol>' +
+        '<form class="topup-form" id="f-bind">' +
+          '<input class="input mono" name="code" placeholder="6 位确认码" maxlength="6" autocapitalize="characters" spellcheck="false" style="max-width:160px;text-transform:uppercase">' +
+          '<button class="btn" type="submit">确认绑定</button>' +
+        '</form><div id="bind-msg"></div>';
+    }
+
+    if (dash.pending && dash.pending.length) {
+      html += '<div style="margin-top:20px;border-top:1px dashed var(--card-border);padding-top:16px">' +
+        '<h2>本校发起过绑定的人</h2><div class="table-scroll"><table>' +
+        '<thead><tr><th>班级</th><th>学号</th><th>目标管理员</th><th>发起时间</th><th>状态</th></tr></thead><tbody>' +
+        dash.pending.map(function(p) {
+          return '<tr><td>' + esc(p.node_label || p.instance_id) + '</td><td class="mono">' + esc(p.class_user_id) + '</td>' +
+            '<td class="muted mono tiny">' + esc(p.admin_username) + '</td>' +
+            '<td class="muted tiny">' + relTime(p.created_at) + '</td>' +
+            '<td>' + (p.expired ? '<span class="badge">已过期</span>' : '<span class="badge badge-warn">待确认</span>') + '</td></tr>';
+        }).join('') + '</tbody></table></div>' +
+        '<p class="tiny muted">他们各自是本班的班管，但席位只有一个。谁最后用密码确认，管理员就是谁。</p></div>';
+    }
+    html += '</section>';
+  }
 
   if (state.activeTab === 'nodes') {
     html += '<section class="card"><div class="card-head"><h2>班级节点</h2><span class="tiny muted">在线 = 最近 ' + Math.round(d.online_window_sec / 60) + ' 分钟内有同步；用量延迟约 5 分钟</span></div>';
@@ -402,7 +452,11 @@ function bindDash() {
   var lo = document.getElementById('btn-logout');
   if (lo) lo.addEventListener('click', logout);
   app.querySelectorAll('[data-tab]').forEach(function(b) {
-    b.addEventListener('click', function() { state.activeTab = b.getAttribute('data-tab'); render(); });
+    b.addEventListener('click', function() {
+      state.activeTab = b.getAttribute('data-tab');
+      if (state.activeTab === 'bind') loadBindings();
+      render();
+    });
   });
   app.querySelectorAll('[data-copy]').forEach(function(b) {
     b.addEventListener('click', function() { copyText(b.getAttribute('data-copy'), b); });
@@ -456,6 +510,32 @@ function bindDash() {
       api('POST', '/my/nodes/' + encodeURIComponent(b.getAttribute('data-restore')) + '/restore').then(loadDash);
     });
   });
+
+  var fb = document.getElementById('f-bind');
+  if (fb) {
+    fb.addEventListener('submit', function(e) {
+      e.preventDefault();
+      var code = (document.querySelector('#f-bind input[name=code]').value || '').trim().toUpperCase();
+      var msg = document.getElementById('bind-msg');
+      msg.innerHTML = '';
+      api('POST', '/my/bind', { code: code }).then(function(d) {
+        msg.innerHTML = '<div class="alert alert-success">' + esc(d.message || '绑定完成') + '</div>';
+        loadDash(); loadBindings();
+      }).catch(function(err) { msg.innerHTML = '<div class="alert alert-danger">' + esc(err.message) + '</div>'; });
+    });
+  }
+  var ub = document.getElementById('btn-unbind');
+  if (ub) {
+    ub.addEventListener('click', function() {
+      if (!window.confirm('解绑后本校管理员席位空出来，任意班管都可以来认领。确认解绑？')) return;
+      api('DELETE', '/my/binding').then(function() { loadDash(); loadBindings(); });
+    });
+  }
+}
+function loadBindings() {
+  api('GET', '/my/bindings').then(function(d) {
+    dash.pending = d.pending; render();
+  }).catch(function() {});
 }
 function loadDash() {
   api('GET', '/my/overview').then(function(d) {
@@ -479,10 +559,15 @@ function viewPlatform() {
   html += '<div class="stat-row">' + stat(d.totals.orgs, '注册学校') + stat(d.totals.nodes, '接入节点') + stat('¥' + yuan(d.totals.usage_cost_micro), '全网累计消耗') + '</div>';
 
   html += '<section class="card"><div class="card-head"><h2>注册学校</h2></div><div class="table-scroll"><table>' +
-    '<thead><tr><th>编号</th><th>名称</th><th>省市</th><th>状态</th><th>本月消耗</th><th>操作</th></tr></thead><tbody>' +
+    '<thead><tr><th>编号</th><th>名称</th><th>省市</th><th>状态</th><th>管理员席位</th><th>本月消耗</th><th>操作</th></tr></thead><tbody>' +
     d.orgs.map(function(o) {
+      var ab = o.admin_binding;
+      var seat = ab
+        ? '<span class="badge badge-ok">' + esc(ab.node_label || ab.instance_id) + ' · ' + esc(ab.class_user_id) + '</span>'
+        : '<span class="badge">未绑定</span>';
       return '<tr><td class="mono">' + esc(o.id) + '</td><td>' + esc(o.name) + '</td><td class="muted">' + esc(o.region || '—') + '</td>' +
         '<td>' + (o.status === 'active' ? '<span class="badge badge-ok">正常</span>' : '<span class="badge badge-danger">停用</span>') + '</td>' +
+        '<td>' + seat + '</td>' +
         '<td>¥' + yuan(o.month_cost_micro) + '</td>' +
         '<td><button class="btn btn-ghost btn-sm ' + (o.status === 'active' ? 'btn-danger' : '') + '" data-org="' + esc(o.id) + '" data-act="' + (o.status === 'active' ? 'disable' : 'enable') + '">' +
           (o.status === 'active' ? '停用' : '启用') + '</button></td></tr>';
@@ -564,7 +649,7 @@ document.addEventListener('submit', function(e) { /* 表单各自绑定，占位
 
 render();
 if (state.token && state.role === 'platform') loadPlatform();
-if (state.token && state.role === 'org') { loadDash(); loadStudents(); }
+if (state.token && state.role === 'org') { loadDash(); loadStudents(); loadBindings(); }
 </script>
 </body>
 </html>

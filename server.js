@@ -67,6 +67,7 @@ var B32 = 'ABCDEFGHJKMNPQRSTVWXYZ23456789'; // 去 0/O/1/I/L
 var NODE_ONLINE_WINDOW_SEC = 600;
 var MAX_ASSIGN_YUAN = 10000;
 var REGISTER_LIMIT_PER_HOUR = 5;
+var BIND_CODE_TTL_MS = 15 * 60 * 1000;   // 绑定确认码 15 分钟有效（够从设备走到电脑网页，不够闲晃）
 
 // ------------------------------------------------------------
 // 数据库（独立 schema：没有学生表 —— 学生不属于这里）
@@ -149,6 +150,41 @@ db.exec([
   '  created_at TEXT NOT NULL',
   ');',
   'CREATE INDEX IF NOT EXISTS idx_usage_org ON usage_log(org_id, created_at DESC);',
+  // ---- 账号绑定：把「班级里的班管」和「云端学校管理员」认成同一个人 ----
+  // 为什么要这张表：接入 CI 后班管在班级设备上就是管理员，在 Cluss-Cloud 上
+  // 又是一个独立的管理员账号，两边两套口令、两个人 —— 换届/交接时最容易出岔。
+  // 绑定后管理员的每一次操作都带着「他是哪个班的哪个学号」这一层身份。
+  // 学号本身不是凭证：真正的证明是「节点用校级密钥上报 + 管理员用密码确认」。
+  'CREATE TABLE IF NOT EXISTS account_bindings (',
+  '  id INTEGER PRIMARY KEY AUTOINCREMENT,',
+  '  org_id TEXT NOT NULL REFERENCES orgs(id),',
+  '  admin_id INTEGER NOT NULL,',            // org_admins.id，锁定到具体那个管理员账号
+  '  admin_username TEXT NOT NULL,',
+  '  instance_id TEXT NOT NULL,',            // 班管所在的班级节点
+  '  class_user_id TEXT NOT NULL,',          // 该节点上的学号
+  "  node_label TEXT NOT NULL DEFAULT '',",
+  "  status TEXT NOT NULL DEFAULT 'active',", // active | released
+  '  bound_at TEXT NOT NULL,',
+  "  released_at TEXT NOT NULL DEFAULT '',",
+  "  note TEXT NOT NULL DEFAULT ''",
+  ');',
+  // 一个学校只有一个「管理员席位」：别的班也有班管，但全校只能有一个班管
+  // 占这个位（DB 层硬保证，不靠代码判断，绕不过去）
+  "CREATE UNIQUE INDEX IF NOT EXISTS ux_bind_org ON account_bindings(org_id) WHERE status = 'active';",
+  // 反过来同一个班级账号也不能同时挂到两个云端账号下
+  "CREATE UNIQUE INDEX IF NOT EXISTS ux_bind_seat ON account_bindings(instance_id, class_user_id) WHERE status = 'active';",
+  'CREATE TABLE IF NOT EXISTS bind_requests (',
+  '  code TEXT PRIMARY KEY,',                // 一次性确认码（6 位），15 分钟内有效
+  '  org_id TEXT NOT NULL REFERENCES orgs(id),',
+  '  instance_id TEXT NOT NULL,',
+  '  class_user_id TEXT NOT NULL,',
+  "  node_label TEXT NOT NULL DEFAULT '',",
+  '  admin_username TEXT NOT NULL,',
+  '  created_at TEXT NOT NULL,',
+  '  expires_at TEXT NOT NULL,',
+  "  used_at TEXT NOT NULL DEFAULT ''",
+  ');',
+  'CREATE INDEX IF NOT EXISTS idx_bindreq_org ON bind_requests(org_id, created_at DESC);',
   'CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);',
   'CREATE TABLE IF NOT EXISTS admins (',     // 平台运营者
   '  username TEXT PRIMARY KEY,',
@@ -521,6 +557,7 @@ app.get('/api/my/overview', requireWeb, requireOrgAdmin, function(req, res) {
       assign_version: parseInt(getMeta('assign_version', '0'), 10) || 0,
       model_config_version: parseInt(getMeta('model_config_version', '0'), 10) || 0,
       online_window_sec: NODE_ONLINE_WINDOW_SEC,
+      admin_binding: myBinding(orgId),
       nodes: nodes,
       totals: totals
     }
@@ -675,6 +712,127 @@ app.post('/api/my/nodes/:instanceId/restore', requireWeb, requireOrgAdmin, funct
 });
 
 // ------------------------------------------------------------
+// 账号绑定 · 第二节：管理员在网页上确认（管理员密码认证）
+// ------------------------------------------------------------
+function myBinding(orgId) {
+  var r = db.prepare("SELECT * FROM account_bindings WHERE org_id = ? AND status = 'active'").get(orgId);
+  if (!r) return null;
+  var node = db.prepare('SELECT label, status, last_seen_at FROM nodes WHERE instance_id = ? AND org_id = ?')
+    .get(r.instance_id, orgId);
+  return {
+    id: r.id,
+    admin_username: r.admin_username,
+    instance_id: r.instance_id,
+    node_label: r.node_label || (node && node.label) || '',
+    node_status: node ? node.status : '',
+    node_last_seen_at: node ? (node.last_seen_at || null) : null,
+    class_user_id: r.class_user_id,
+    bound_at: r.bound_at,
+    note: r.note
+  };
+}
+
+app.get('/api/my/bindings', requireWeb, requireOrgAdmin, function(req, res) {
+  var orgId = req.org.id;
+  // 本校所有未用的确认码（谁在哪个班发起过）：管理员能一眼看到
+  // 「2 班班管也想来当管理员」这件事，而不是只在被拒绝时才知道有人来过
+  var pending = db.prepare([
+    'SELECT code, instance_id, class_user_id, node_label, admin_username, created_at, expires_at',
+    'FROM bind_requests WHERE org_id = ? AND used_at = ? ORDER BY created_at DESC LIMIT 20'
+  ].join('\n')).all(orgId, '');
+  res.json({
+    code: 200, message: 'ok',
+    data: {
+      binding: myBinding(orgId),
+      pending: pending.map(function(p) {
+        return {
+          bind_code: p.code,
+          instance_id: p.instance_id,
+          node_label: p.node_label,
+          class_user_id: p.class_user_id,
+          admin_username: p.admin_username,
+          created_at: p.created_at,
+          expires_at: p.expires_at,
+          expired: p.expires_at <= nowIso()
+        };
+      })
+    }
+  });
+});
+
+app.post('/api/my/bind', requireWeb, requireOrgAdmin, function(req, res) {
+  var code = String((req.body || {}).code || '').trim().toUpperCase();
+  if (!code) return res.status(400).json({ code: 400, message: '请填写确认码' });
+
+  var reqRow = db.prepare('SELECT * FROM bind_requests WHERE code = ?').get(code);
+  if (!reqRow) return res.status(404).json({ code: 404, message: '确认码不存在，请检查是否输错' });
+  // 跨校确认码一律当无效：不给「拿别校的码来试」留任何回声
+  if (reqRow.org_id !== req.org.id) {
+    return res.status(403).json({ code: 403, message: '该确认码不属于本校' });
+  }
+  if (reqRow.used_at) return res.status(409).json({ code: 409, message: '该确认码已使用过了，请重新发起' });
+  if (reqRow.expires_at <= nowIso()) {
+    return res.status(410).json({ code: 410, message: '确认码已过期，请回到班级设备重新发起' });
+  }
+
+  // 全校一个管理员席位：这里再判一次（给人一句能看懂的话），
+  // 真正的硬保证在 ux_bind_org 这个部分唯一索引上。
+  var held = db.prepare("SELECT * FROM account_bindings WHERE org_id = ? AND status = 'active'").get(req.org.id);
+  if (held) {
+    return res.status(409).json({
+      code: 409,
+      message: '本校管理员席位已绑定给「' + (held.node_label || held.instance_id) + ' · 学号 ' + held.class_user_id +
+        '」。一个学校只能有一个班管当管理员，要换人请先解绑。'
+    });
+  }
+
+  var admin = db.prepare('SELECT * FROM org_admins WHERE username = ? AND org_id = ?')
+    .get(reqRow.admin_username, req.org.id);
+  if (!admin) {
+    return res.status(409).json({ code: 409, message: '确认码对应的管理员账号已不存在，请重新发起' });
+  }
+
+  var now = nowIso();
+  var tx = db.transaction(function() {
+    db.prepare([
+      'INSERT INTO account_bindings (org_id, admin_id, admin_username, instance_id, class_user_id,',
+      "  node_label, status, bound_at, note)",
+      "VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)"
+    ].join('\n')).run(
+      req.org.id, admin.id, admin.username, reqRow.instance_id, reqRow.class_user_id,
+      reqRow.node_label, now, '管理员 = 该班班管本人'
+    );
+    db.prepare('UPDATE bind_requests SET used_at = ? WHERE code = ?').run(now, code);
+  });
+  try {
+    tx();
+  } catch (err) {
+    // 并发双提交时唯一索引会拦下来，翻译成人话
+    if (String(err.message || '').indexOf('UNIQUE') >= 0) {
+      return res.status(409).json({ code: 409, message: '本校管理员席位已被占用，一个学校只能有一个班管当管理员' });
+    }
+    throw err;
+  }
+
+  console.log('[Bind] 绑定成立: 学校 %s 管理员 %s ← %s · 学号 %s',
+    req.org.id, admin.username, reqRow.node_label || reqRow.instance_id, reqRow.class_user_id);
+  res.json({
+    code: 200,
+    message: '绑定完成：现在这个管理员账号就是你所在班的班管本人',
+    data: { binding: myBinding(req.org.id) }
+  });
+});
+
+app.delete('/api/my/binding', requireWeb, requireOrgAdmin, function(req, res) {
+  var row = db.prepare("SELECT * FROM account_bindings WHERE org_id = ? AND status = 'active'").get(req.org.id);
+  if (!row) return res.status(404).json({ code: 404, message: '当前没有绑定关系' });
+  db.prepare("UPDATE account_bindings SET status = 'released', released_at = ? WHERE id = ?")
+    .run(nowIso(), row.id);
+  console.log('[Bind] 已解绑: 学校 %s（管理员 %s）', req.org.id, row.admin_username);
+  res.json({ code: 200, message: '已解绑。席位空出来后，本校任意班管都可以来认领。', data: { binding: null } });
+});
+
+// ------------------------------------------------------------
 // 平台运营者视角（/api/platform/*）
 // ------------------------------------------------------------
 app.get('/api/platform/overview', requireWeb, requirePlatform, function(req, res) {
@@ -699,7 +857,8 @@ app.get('/api/platform/overview', requireWeb, requirePlatform, function(req, res
         ].join('\n')).get(monthIso, o.id);
         return {
           id: o.id, name: o.name, region: o.region, status: o.status, created_at: o.created_at,
-          calls: t.calls, cost_micro: t.cost_micro, month_cost_micro: t.month_cost_micro
+          calls: t.calls, cost_micro: t.cost_micro, month_cost_micro: t.month_cost_micro,
+          admin_binding: myBinding(o.id)
         };
       }),
       nodes: nodes.map(function(r) {
@@ -772,6 +931,62 @@ app.post('/api/platform/orgs/:orgId/:action(disable|enable)', requireWeb, requir
   db.prepare('UPDATE orgs SET status = ? WHERE id = ?').run(status, org.id);
   console.log('[Platform] 学校 %s → %s', org.id, status);
   res.json({ code: 200, message: status === 'disabled' ? '已停用，该校节点同步将被拒绝' : '已启用' });
+});
+
+// ------------------------------------------------------------
+// 账号绑定 · 第一节：班级节点发起（node 认证，校级密钥）
+//
+// 为什么由节点发起而不是管理员自己在网页上填学号：云端永远不存班级密码，
+// 网页上填学号等于谁都能声称自己是任何人。节点是唯一能作证「当前登录的这个
+// 人就是 X 班学号 Y，而且他是班管」的地方 —— 它只在自己这台上这么确信。
+// 节点把一份**一次性确认码**递上来，管理员再用自己的密码去网页上确认，
+// 两头对上才认定是同一个人。
+//
+// body: { admin_username, class_user_id, class_admin }
+// ------------------------------------------------------------
+app.post('/api/sync/bind-request', requireNode, function(req, res) {
+  var b = req.body || {};
+  var adminUsername = String(b.admin_username || '').trim().toLowerCase().slice(0, 30);
+  var classUserId = String(b.class_user_id || '').trim().slice(0, 40);
+  var instanceId = String(req.headers['x-cluss-instance'] || '').trim();
+
+  if (!instanceId) return res.status(400).json({ code: 400, message: '缺少实例标识' });
+  if (!classUserId) return res.status(400).json({ code: 400, message: '缺少班级学号' });
+  // 节点只在「当前登录者确实是班管」时才允许发起：这是绑定关系的另一半前提
+  if (!b.class_admin) {
+    return res.status(403).json({ code: 403, message: '只有本班班管可以发起账号绑定（当前账号不是班管）' });
+  }
+
+  var admin = db.prepare('SELECT * FROM org_admins WHERE username = ?').get(adminUsername);
+  if (!admin || admin.org_id !== req.nodeOrg) {
+    return res.status(403).json({ code: 403, message: '该用户名不是本学校的管理员账号' });
+  }
+
+  // 同一次重发会把这个人此前未用的确认码作废：确认码只保留最新一枚
+  db.prepare([
+    "UPDATE bind_requests SET used_at = ? WHERE org_id = ? AND instance_id = ? AND class_user_id = ? AND used_at = ''"
+  ].join('\n')).run(nowIso(), req.nodeOrg, instanceId, classUserId);
+
+  var node = db.prepare('SELECT label FROM nodes WHERE instance_id = ? AND org_id = ?').get(instanceId, req.nodeOrg);
+  var code = randomCode(6);
+  var now = nowIso();
+  var expires = new Date(Date.now() + BIND_CODE_TTL_MS).toISOString();
+  db.prepare([
+    'INSERT INTO bind_requests (code, org_id, instance_id, class_user_id, node_label, admin_username, created_at, expires_at)',
+    'VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  ].join('\n')).run(code, req.nodeOrg, instanceId, classUserId,
+    String((node && node.label) || ''), adminUsername, now, expires);
+
+  console.log('[Bind] %s（学校 %s，学号 %s）发起绑定管理员 %s', instanceId, req.nodeOrg, classUserId, adminUsername);
+  res.json({
+    code: 200, message: 'ok',
+    data: {
+      bind_code: code,
+      expires_at: expires,
+      admin_username: adminUsername,
+      ttl_sec: Math.round(BIND_CODE_TTL_MS / 1000)
+    }
+  });
 });
 
 // ------------------------------------------------------------
