@@ -310,10 +310,68 @@ function main() {
       orgA && orgA.admin_binding && orgA.admin_binding.class_user_id === '100202',
       JSON.stringify(orgA && orgA.admin_binding));
 
-    console.log('\n========================================');
-    console.log('结果: ' + pass + ' 通过, ' + fail + ' 失败');
-    console.log('========================================');
-    shutdown(fail ? 1 : 0);
+    console.log('\n== ⑧ 学生台账 / 额度归零 / 密钥隔离 ==');
+    return http('GET', baseUrl + '/api/my/students', undefined, { Authorization: 'Bearer ' + tokenA })
+      .then(function(r) {
+        // 这条路由以前从没被验证套件碰过，于是「参数个数不对 → 恒 500」
+        // 一直没人发现，学生的额度台账页从上线起就是坏的。
+        ok('学生台账接口不 500', r.status === 200, 'HTTP ' + r.status);
+        var list = (r.data && r.data.data && r.data.data.students) || [];
+        ok('台账能列出已分配的学生', list.length > 0, JSON.stringify(list.map(function(s) { return s.user_id; })));
+        return http('GET', baseUrl + '/api/my/students?keyword=1001', undefined, { Authorization: 'Bearer ' + tokenA });
+      }).then(function(r) {
+        ok('带关键词查询也正常', r.status === 200, 'HTTP ' + r.status);
+        return http('POST', baseUrl + '/api/my/topup', { user_id: '100101', amount_yuan: 0, reason: '停用测试' },
+          { Authorization: 'Bearer ' + tokenA });
+      }).then(function(r) {
+        ok('额度设为 0 被接受', r.status === 200 && r.data.data.allocated_micro === 0,
+          JSON.stringify(r.data && r.data.data));
+        return http('GET', baseUrl + '/api/sync/assignments', undefined, nodeHeaders(global.A.org_id, 'class-a1', 0, 0));
+      }).then(function(r) {
+        // 归零记录必须真的下发：云端账清了、版本号也涨了，节点却收不到，
+        // 学生的额度就永远停不掉——这是扣费系统最不能错的方向。
+        var a = (r.data && r.data.data && r.data.data.assignments) || [];
+        var zero = a.filter(function(x) { return x.user_id === '100101' && x.allocated_micro === 0; });
+        ok('归零记录会下发到节点', zero.length === 1,
+          '下发内容: ' + JSON.stringify(a.map(function(x) { return x.user_id + '=' + x.allocated_micro; })));
+        return http('GET', baseUrl + '/api/sync/model-config', undefined, nodeHeaders(global.A.org_id, 'class-a1', 0, 0));
+      }).then(function(r) {
+        var models = (r.data && r.data.data && r.data.data.models) || [];
+        var leaked = models.filter(function(m) { return m.api_key && m.api_key !== ''; });
+        // 注册接口是公开无审批的：不隔离的话，任何人花 10 秒注册一个学校
+        // 就能拿到平台运营者的 LLM 供应商密钥，直接烧平台的钱。
+        ok('未配密钥的学校拿不到平台密钥', leaked.length === 0,
+          '拿到的 api_key: ' + JSON.stringify(leaked.map(function(m) { return m.api_key; })));
+        ok('模型列表本身照常下发（学生还要用它显示）', models.length > 0, '模型数 ' + models.length);
+        return http('PUT', baseUrl + '/api/platform/orgs/' + global.A.org_id + '/model-key',
+          { api_key: 'sk-ORG-A-KEY-123' }, { Authorization: 'Bearer ' + tokenPlatform });
+      }).then(function(r) {
+        ok('平台可给该校单独下发密钥', r.status === 200, 'HTTP ' + r.status);
+        return http('GET', baseUrl + '/api/sync/model-config', undefined, nodeHeaders(global.A.org_id, 'class-a1', 0, 0));
+      }).then(function(r) {
+        var models = (r.data && r.data.data && r.data.data.models) || [];
+        ok('配了之后节点拿到的是本校密钥',
+          models.length > 0 && models[0].api_key === 'sk-ORG-A-KEY-123',
+          JSON.stringify(models.map(function(m) { return m.api_key; })));
+        return http('GET', baseUrl + '/api/sync/model-config', undefined, nodeHeaders(global.B.org_id, 'class-b1', 0, 0));
+      }).then(function(r) {
+        var models = (r.data && r.data.data && r.data.data.models) || [];
+        ok('A 校的密钥不会串到 B 校',
+          models.every(function(m) { return m.api_key !== 'sk-ORG-A-KEY-123'; }),
+          JSON.stringify(models.map(function(m) { return m.api_key; })));
+        return http('GET', baseUrl + '/api/platform/overview', undefined, { Authorization: 'Bearer ' + tokenPlatform });
+      }).then(function(r) {
+        var oa = r.data.data.orgs.filter(function(o) { return o.id === global.A.org_id; })[0];
+        var ob = r.data.data.orgs.filter(function(o) { return o.id === global.B.org_id; })[0];
+        ok('平台视图能看出哪校配了密钥',
+          oa && oa.has_model_key === true && ob && ob.has_model_key === false,
+          'A=' + (oa && oa.has_model_key) + ' B=' + (ob && ob.has_model_key));
+      }).then(function() {
+        console.log('\n========================================');
+        console.log('结果: ' + pass + ' 通过, ' + fail + ' 失败');
+        console.log('========================================');
+        shutdown(fail ? 1 : 0);
+      });
   }).catch(function(err) {
     console.error('\n验证异常:', err && err.message);
     if (child) console.error('--- 服务日志尾部 ---\n' + child.buf().split('\n').slice(-25).join('\n'));

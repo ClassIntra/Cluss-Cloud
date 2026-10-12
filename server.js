@@ -185,6 +185,14 @@ db.exec([
   "  used_at TEXT NOT NULL DEFAULT ''",
   ');',
   'CREATE INDEX IF NOT EXISTS idx_bindreq_org ON bind_requests(org_id, created_at DESC);',
+  // 每所学校自己的模型密钥。不建这张表的话，/api/sync/model-config 会把平台
+  // 运营者的 LLM 供应商密钥原样发给任何注册方——而注册接口是公开无审批的，
+  // 等于任何人花 10 秒就能拿到平台的钱包。
+  'CREATE TABLE IF NOT EXISTS org_model_keys (',
+  '  org_id TEXT PRIMARY KEY REFERENCES orgs(id),',
+  '  api_key TEXT NOT NULL,',
+  '  updated_at TEXT NOT NULL',
+  ');',
   'CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);',
   'CREATE TABLE IF NOT EXISTS admins (',     // 平台运营者
   '  username TEXT PRIMARY KEY,',
@@ -568,12 +576,8 @@ app.get('/api/my/students', requireWeb, requireOrgAdmin, function(req, res) {
   var orgId = req.org.id;
   var keyword = String(req.query.keyword || '').trim();
   var limit = Math.min(parseInt(req.query.limit, 10) || 300, 1000);
-  var params = [orgId, orgId];
-  var where = 'WHERE a.org_id = ?';
-  if (keyword) { where += ' AND a.user_id LIKE ?'; params.push('%' + keyword + '%'); }
-  params.push(orgId, limit);
 
-  var rows = db.prepare([
+  var sql = [
     'SELECT a.user_id, a.allocated_micro, a.weekly_quota_micro, a.updated_at, a.assigned_by,',
     '  IFNULL(s.used_micro,0) AS used_micro, IFNULL(s.calls,0) AS calls, s.last_at',
     'FROM allocations a',
@@ -581,19 +585,20 @@ app.get('/api/my/students', requireWeb, requireOrgAdmin, function(req, res) {
     '  SELECT user_id, SUM(cost_micro) AS used_micro, COUNT(*) AS calls, MAX(created_at) AS last_at',
     '  FROM usage_log WHERE org_id = ? GROUP BY user_id',
     ') s ON s.user_id = a.user_id',
-    where,
-    'ORDER BY a.updated_at DESC LIMIT ?'
-  ].join('\n')).all.apply(db.prepare([
-    'SELECT a.user_id, a.allocated_micro, a.weekly_quota_micro, a.updated_at, a.assigned_by,',
-    '  IFNULL(s.used_micro,0) AS used_micro, IFNULL(s.calls,0) AS calls, s.last_at',
-    'FROM allocations a',
-    'LEFT JOIN (',
-    '  SELECT user_id, SUM(cost_micro) AS used_micro, COUNT(*) AS calls, MAX(created_at) AS last_at',
-    '  FROM usage_log WHERE org_id = ? GROUP BY user_id',
-    ') s ON s.user_id = a.user_id',
-    where,
-    'ORDER BY a.updated_at DESC LIMIT ?'
-  ].join('\n')), params);
+    'WHERE a.org_id = ?'
+  ].join('\n');
+
+  // 关键词可选，占位符个数跟着变。显式分两支而不是拼参数数组：
+  // 这个路由以前正是因为数组多推了一个值而恒 500，
+  // 而验证套件从没调过它，于是没人发现。写成 if/else 让两者对得上。
+  var rows;
+  if (keyword) {
+    sql += ' AND a.user_id LIKE ? ORDER BY a.updated_at DESC LIMIT ?';
+    rows = db.prepare(sql).all(orgId, orgId, '%' + keyword + '%', limit);
+  } else {
+    sql += ' ORDER BY a.updated_at DESC LIMIT ?';
+    rows = db.prepare(sql).all(orgId, orgId, limit);
+  }
 
   res.json({
     code: 200, message: 'ok',
@@ -638,8 +643,10 @@ app.post('/api/my/topup', requireWeb, requireOrgAdmin, function(req, res) {
   var now = nowIso();
   var idemKey = 'topup:' + req.org.id + ':' + userId + ':' + crypto.randomBytes(8).toString('hex');
 
+  var previousMicro = 0;
   var tx = db.transaction(function() {
     var before = db.prepare('SELECT allocated_micro FROM allocations WHERE user_id = ? AND org_id = ?').get(userId, req.org.id);
+    previousMicro = before ? before.allocated_micro : 0;
     db.prepare([
       'INSERT INTO allocations (user_id, org_id, allocated_micro, weekly_quota_micro, assigned_by, updated_at)',
       'VALUES (?, ?, ?, ?, ?, ?)',
@@ -647,7 +654,7 @@ app.post('/api/my/topup', requireWeb, requireOrgAdmin, function(req, res) {
       '  weekly_quota_micro = excluded.weekly_quota_micro, assigned_by = excluded.assigned_by,',
       '  updated_at = excluded.updated_at'
     ].join('\n')).run(userId, req.org.id, allocated, weekly, req.auth.name, now);
-    var delta = allocated - (before ? before.allocated_micro : 0);
+    var delta = allocated - previousMicro;
     if (delta !== 0) {
       db.prepare([
         'INSERT INTO credit_log (org_id, user_id, amount_micro, kind, reason, operator, idem_key, created_at)',
@@ -659,7 +666,18 @@ app.post('/api/my/topup', requireWeb, requireOrgAdmin, function(req, res) {
   tx();
 
   console.log('[Org] 充值: 学校 %s → %s ¥%s by %s', req.org.id, userId, amountYuan, req.auth.name);
-  res.json({ code: 200, message: '已充值，各班节点将在 1 分钟内同步到', data: { assign_version: parseInt(getMeta('assign_version', '0'), 10) } });
+  // 把改后的总额回传：语义是「设为 N 元」而不是「加 N 元」，不回传的话
+  // 连点两次预设时管理员会以为充了两份，账实对不上还查不出原因。
+  res.json({
+    code: 200,
+    message: '额度已设为 ¥' + amountYuan + '，各班节点将在 1 分钟内同步',
+    data: {
+      assign_version: parseInt(getMeta('assign_version', '0'), 10),
+      user_id: userId,
+      allocated_micro: allocated,
+      previous_micro: previousMicro
+    }
+  });
 });
 
 app.get('/api/my/logs', requireWeb, requireOrgAdmin, function(req, res) {
@@ -858,7 +876,8 @@ app.get('/api/platform/overview', requireWeb, requirePlatform, function(req, res
         return {
           id: o.id, name: o.name, region: o.region, status: o.status, created_at: o.created_at,
           calls: t.calls, cost_micro: t.cost_micro, month_cost_micro: t.month_cost_micro,
-          admin_binding: myBinding(o.id)
+          admin_binding: myBinding(o.id),
+          has_model_key: !!db.prepare('SELECT 1 FROM org_model_keys WHERE org_id = ? AND api_key <> \'\'').get(o.id)
         };
       }),
       nodes: nodes.map(function(r) {
@@ -921,6 +940,25 @@ app.put('/api/platform/model-config', requireWeb, requirePlatform, function(req,
     code: 200, message: '已保存，各班节点将在 1 分钟内自动同步',
     data: { model_config_version: version }
   });
+});
+
+// 给某校下发它自己的模型密钥（平台运营者）。
+// 没有这一步，学校节点拉到的模型 api_key 会是空串，学生点了就报错——
+// 所以配置完记得确认该校的节点真的能跑通一次对话。
+app.put('/api/platform/orgs/:orgId/model-key', requireWeb, requirePlatform, function(req, res) {
+  var org = db.prepare('SELECT id FROM orgs WHERE id = ?').get(req.params.orgId);
+  if (!org) return res.status(404).json({ code: 404, message: '学校不存在' });
+  var apiKey = String((req.body || {}).api_key || '').trim();
+  if (apiKey && apiKey.length < 8) {
+    return res.status(400).json({ code: 400, message: 'api_key 太短，请填完整的供应商密钥' });
+  }
+  db.prepare([
+    'INSERT INTO org_model_keys (org_id, api_key, updated_at) VALUES (?, ?, ?)',
+    'ON CONFLICT(org_id) DO UPDATE SET api_key = excluded.api_key, updated_at = excluded.updated_at'
+  ].join('\n')).run(req.params.orgId, apiKey, nowIso().replace('T', ' ').slice(0, 19));
+  bumpMeta('model_config_version'); // 让节点尽快拉到
+  console.log('[Platform] 学校 %s 的模型密钥已%s', req.params.orgId, apiKey ? '更新' : '清空');
+  res.json({ code: 200, message: apiKey ? '已下发，该校节点会在 1 分钟内同步' : '已清空' });
 });
 
 // 学校停用/启用（平台运营者的总闸）
@@ -1005,9 +1043,12 @@ app.get('/api/sync/version', requireNode, function(req, res) {
 });
 
 app.get('/api/sync/assignments', requireNode, function(req, res) {
+  // 不要过滤 allocated_micro > 0：管理员把额度调回 0 是必须能生效的操作，
+  // 而节点侧 applyAssignments 只处理快照里出现的条目——过滤掉就等于
+  // 「云端账清了、版本号也涨了、节点余额纹丝不动」，账实永久不一致。
   var rows = db.prepare([
     'SELECT user_id, allocated_micro, weekly_quota_micro, assigned_by, updated_at',
-    'FROM allocations WHERE allocated_micro > 0 AND org_id = ?'
+    'FROM allocations WHERE org_id = ?'
   ].join('\n')).all(req.nodeOrg);
   res.json({
     code: 200, message: 'ok',
@@ -1022,11 +1063,24 @@ app.get('/api/sync/model-config', requireNode, function(req, res) {
   var raw = getMeta('model_config', 'null');
   var doc = null;
   try { doc = JSON.parse(raw); } catch (e) { doc = null; }
+  var models = (doc && doc.models) || [];
+
+  // 逐校换密钥：平台配置的模板里带着运营者的供应商密钥，直接下发等于把钱包
+  // 送给任何注册方。本校配了 org_model_keys 就用它替换，没配就把 api_key 抹空
+  // ——模型列表照常下发（学生还要用它显示模型名），只是不能拿去调供应商。
+  var own = db.prepare('SELECT api_key FROM org_model_keys WHERE org_id = ?').get(req.nodeOrg);
+  var key = own && own.api_key ? own.api_key : '';
+  models = models.map(function(m) {
+    var copy = Object.assign({}, m);
+    copy.api_key = key;
+    return copy;
+  });
+
   res.json({
     code: 200, message: 'ok',
     data: {
       model_config_version: parseInt(getMeta('model_config_version', '0'), 10) || 0,
-      models: (doc && doc.models) || [],
+      models: models,
       sources: (doc && doc.sources) || [],
       meta: (doc && doc.meta) || {}
     }

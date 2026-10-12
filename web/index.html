@@ -395,11 +395,11 @@ function viewDash() {
 
   if (state.activeTab === 'ledger') {
     html += '<section class="card"><div class="card-head"><h2>额度台账</h2><input class="input" id="kw" placeholder="按学号筛选…" style="max-width:220px"></div>' +
-      '<p class="tiny muted" style="margin-top:0">学生账号在本班设备上，这里按学号记账：分配 − 上报消耗 = 余额（分钟级延迟）。</p>' +
+      '<p class="tiny muted" style="margin-top:0">学生账号在本班设备上，这里按学号记账。<b>填的是总额度（覆盖），不是追加</b>——想加钱就把当前总额度加上再填。分配 − 上报消耗 = 余额（分钟级延迟）。</p>' +
       '<form class="topup-form" id="f-topup">' +
         '<input class="input" name="user_id" placeholder="学号" autocapitalize="off" spellcheck="false">' +
-        '<input class="input" name="amount_yuan" type="number" min="0" step="0.01" placeholder="金额（元）" style="max-width:130px">' +
-        '<div class="preset-row">' + [1, 5, 10, 20].map(function(p) { return '<button type="button" class="btn btn-ghost btn-sm preset" data-p="' + p + '">+' + p + '元</button>'; }).join('') + '</div>' +
+        '<input class="input" name="amount_yuan" type="number" min="0" step="0.01" placeholder="总额度（元）" style="max-width:140px">' +
+        '<div class="preset-row">' + [1, 5, 10, 20].map(function(p) { return '<button type="button" class="btn btn-ghost btn-sm preset" data-p="' + p + '">设为' + p + '元</button>'; }).join('') + '</div>' +
         '<input class="input" name="weekly_quota_yuan" type="number" min="0" step="0.01" placeholder="周限额(元)" style="max-width:130px">' +
         '<button class="btn" type="submit">充值</button>' +
       '</form><div id="topup-msg"></div>' +
@@ -567,18 +567,25 @@ function viewPlatform() {
   html += '<div class="stat-row">' + stat(d.totals.orgs, '注册学校') + stat(d.totals.nodes, '接入节点') + stat('¥' + yuan(d.totals.usage_cost_micro), '全网累计消耗') + '</div>';
 
   html += '<section class="card"><div class="card-head"><h2>注册学校</h2></div><div class="table-scroll"><table>' +
-    '<thead><tr><th>编号</th><th>名称</th><th>省市</th><th>状态</th><th>管理员席位</th><th>本月消耗</th><th>操作</th></tr></thead><tbody>' +
+    '<thead><tr><th>编号</th><th>名称</th><th>省市</th><th>状态</th><th>管理员席位</th><th>模型密钥</th><th>本月消耗</th><th>操作</th></tr></thead><tbody>' +
     d.orgs.map(function(o) {
       var ab = o.admin_binding;
       var seat = ab
         ? '<span class="badge badge-ok">' + esc(ab.node_label || ab.instance_id) + ' · ' + esc(ab.class_user_id) + '</span>'
         : '<span class="badge">未绑定</span>';
+      // 密钥状态放在表里是刚需：没配密钥的学校，学生的对话会直接失败，
+      // 而看板上看不出任何异常，只能靠这一列提前发现。
+      var key = o.has_model_key
+        ? '<span class="badge badge-ok">已配</span>'
+        : '<span class="badge badge-danger">未配</span>';
       return '<tr><td class="mono">' + esc(o.id) + '</td><td>' + esc(o.name) + '</td><td class="muted">' + esc(o.region || '—') + '</td>' +
         '<td>' + (o.status === 'active' ? '<span class="badge badge-ok">正常</span>' : '<span class="badge badge-danger">停用</span>') + '</td>' +
         '<td>' + seat + '</td>' +
+        '<td>' + key + '</td>' +
         '<td>¥' + yuan(o.month_cost_micro) + '</td>' +
         '<td><button class="btn btn-ghost btn-sm ' + (o.status === 'active' ? 'btn-danger' : '') + '" data-org="' + esc(o.id) + '" data-act="' + (o.status === 'active' ? 'disable' : 'enable') + '">' +
-          (o.status === 'active' ? '停用' : '启用') + '</button></td></tr>';
+          (o.status === 'active' ? '停用' : '启用') + '</button>' +
+          '<button class="btn btn-ghost btn-sm" data-orgkey="' + esc(o.id) + '">密钥</button></td></tr>';
     }).join('') + '</tbody></table></div></section>';
 
       var curModelV = plat.mcVersion;
@@ -611,6 +618,16 @@ function bindPlatform() {
       var act = b.getAttribute('data-act');
       if (act === 'disable' && !window.confirm('停用后该校所有节点的同步都会被拒绝，确认？')) return;
       api('POST', '/platform/orgs/' + b.getAttribute('data-org') + '/' + act).then(loadPlatform);
+    });
+  });
+  app.querySelectorAll('[data-orgkey]').forEach(function(b) {
+    b.addEventListener('click', function() {
+      var orgId = b.getAttribute('data-orgkey');
+      var cur = prompt('给学校 ' + orgId + ' 下发的模型供应商密钥（留空表示清空）：\n清空后该校学生的对话会失败——模型还在，但调不动供应商。');
+      if (cur === null) return;
+      api('PUT', '/platform/orgs/' + encodeURIComponent(orgId) + '/model-key', { api_key: cur.trim() })
+        .then(function(d) { alert(d && d.message || '已保存'); loadPlatform(); })
+        .catch(function(e) { alert('失败：' + e.message); });
     });
   });
   var save = document.getElementById('mc-save');
