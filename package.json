@@ -1,6 +1,6 @@
 {
   "name": "cluss-cloud",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "ClussCloud —— 多班同步管理公共服务（策略下发 / 积分分配 / 用量对账）。班级设备上跑 Cluss，云上只跑这个。",
   "scripts": {
