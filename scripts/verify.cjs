@@ -308,7 +308,7 @@ function bareHeaders(org, instance) {
 }
 
 function main() {
-  var tokenA, tokenPlatform, code1;
+  var tokenA, tokenPlatform, code1, SEAT, OTHER, seatNode;
 
   return freePort().then(function(port) {
     baseUrl = 'http://127.0.0.1:' + port;
@@ -534,9 +534,9 @@ function main() {
 
     console.log('\n== ⑧ 配置上行写：席位班管在本地改 → 同步全校 ==');
     // 上一节结束时 A 校席位已在 class-a2（学号 100202）上。
-    var SEAT = { instance: 'class-a2', user: '100202' };
-    var OTHER = { instance: 'class-a1', user: '100101' };
-    var seatNode = function(v) {
+    SEAT = { instance: 'class-a2', user: '100202' };
+    OTHER = { instance: 'class-a1', user: '100101' };
+    seatNode = function(v) {
       var h = nodeHeaders(global.A.org_id, SEAT.instance, v || 0, v || 0);
       return h;
     };
@@ -663,7 +663,120 @@ function main() {
         return http('GET', baseUrl + '/api/my/overview', undefined, { Authorization: 'Bearer ' + tokenA });
       }).then(function(r) {
         ok('上行写不会误伤其他学校的密钥隔离', r.status === 200);
-        console.log('\n== ⑨ 学生台账 / 额度归零 / 密钥隔离 ==');
+
+        // ---- 全校花名册：跨班充值缺的只是「看得见」 ----
+        // 18 班班管有写入权，列表里却只有本班学生；8 班看得见自己学生，
+        // 却没有写入权 —— 谁都不能给 8 班充。这一节验的就是打通后的三件事：
+        //   ① 每个班都能上行自己（非席位班也必须能报，否则席位班永远等不到）
+        //   ② 只有席位班能下行全校（学号+姓名校内全传播，不是人手一份）
+        //   ③ 上行只换自己 instance 的行，不碰别人的（也不碰跨校）
+        section('⑨ 全校花名册：看得见（只补可见性，不开权限口子）');
+        return http('POST', baseUrl + '/api/sync/roster', {
+          items: [
+            { user_id: '100101', class_no: '1', net_name: 'jia', real_name: '学生甲', is_admin: 1, status: 'active' },
+            { user_id: '100102', class_no: '1', net_name: 'yi', real_name: '学生乙', is_admin: 0, status: 'active' }
+          ]
+        }, nodeHeaders(global.A.org_id, OTHER.instance, 0, 0));
+      }).then(function(r) {
+        ok('非席位班也能上行本班名册', r.status === 200 && r.data.data.count === 2,
+          'HTTP ' + r.status + ' ' + JSON.stringify(r.data && r.data.data));
+        global.ROSTER_V = (r.data.data && r.data.data.roster_version) || 0;
+        ok('名册版本号开始计数', global.ROSTER_V >= 1, 'v' + global.ROSTER_V);
+        return http('POST', baseUrl + '/api/sync/roster', {
+          items: [
+            { user_id: '100101', class_no: '1', net_name: 'jia', real_name: '学生甲', is_admin: 1, status: 'active' },
+            { user_id: '100102', class_no: '1', net_name: 'yi', real_name: '学生乙', is_admin: 0, status: 'active' }
+          ]
+        }, nodeHeaders(global.A.org_id, OTHER.instance, 0, 0));
+      }).then(function(r) {
+        // 一字不差就不动库：否则节点每轮轮询都会推一次，版本号空转、
+        // 席位班每 60 秒白拉一次全校名册。
+        ok('名册没变化时不重复涨版本（幂等）',
+          r.status === 200 && r.data.data.changed === false && r.data.data.roster_version === global.ROSTER_V,
+          JSON.stringify(r.data && r.data.data));
+        return http('GET', baseUrl + '/api/sync/roster', undefined,
+          nodeHeaders(global.A.org_id, OTHER.instance, 0, 0));
+      }).then(function(r) {
+        ok('非席位班读全校名册被拒（403）', r.status === 403, 'HTTP ' + r.status + ' ' + (r.data && r.data.message));
+        ok('拒绝理由说清了席位在哪个班',
+          r.status === 403 && String(r.data.message).indexOf(SEAT.instance) > 0,
+          r.data && r.data.message);
+        return http('GET', baseUrl + '/api/sync/roster', undefined, seatNode());
+      }).then(function(r) {
+        var rows = (r.status === 200 && r.data.data.roster) || [];
+        ok('席位班能读到全校名册', r.status === 200 && rows.length === 2,
+          'HTTP ' + r.status + ' rows=' + rows.length);
+        ok('名册行标明了这个学生是哪个班报上来的',
+          rows.every(function(x) { return x.instance_id === OTHER.instance; }),
+          JSON.stringify(rows.map(function(x) { return x.user_id + '@' + x.instance_id; })));
+        // 刻意不存金额：金额是账本的事，读的时候现 JOIN，永远是权威值。
+        var jia = rows.filter(function(x) { return x.user_id === '100101'; })[0];
+        ok('名册现场 JOIN 出本校账本的额度',
+          jia && jia.allocated_micro === 5000000, JSON.stringify(jia));
+        ok('用量也一并 JOIN 出来（不用抄第二份口径）',
+          jia && jia.used_micro === 1000000 && jia.calls === 1,
+          JSON.stringify(jia && { used: jia.used_micro, calls: jia.calls }));
+        // 席位班上报自己那班 —— 只该动自己 instance 的行
+        return http('POST', baseUrl + '/api/sync/roster', {
+          items: [{ user_id: '100202', class_no: '2', net_name: 'bing', real_name: '学生丙', is_admin: 1, status: 'active' }]
+        }, seatNode());
+      }).then(function(r) {
+        ok('席位班也上报自己那班', r.status === 200 && r.data.data.count === 1,
+          JSON.stringify(r.data && r.data.data));
+        ok('每班一报，版本号跟着涨', r.data.data.roster_version > global.ROSTER_V,
+          'v' + r.data.data.roster_version);
+        global.ROSTER_V = r.data.data.roster_version;
+        return http('GET', baseUrl + '/api/sync/roster', undefined, seatNode());
+      }).then(function(r) {
+        var rows = (r.data && r.data.data && r.data.data.roster) || [];
+        // 整实例替换语义：1 班重报一次不该把 2 班的名字从全校名册里抹掉。
+        ok('两班并存（上行只替换自己 instance 的行）', rows.length === 3,
+          JSON.stringify(rows.map(function(x) { return x.user_id + '@' + x.instance_id; })));
+        return http('GET', baseUrl + '/api/sync/version', undefined,
+          nodeHeaders(global.A.org_id, OTHER.instance, 0, 0));
+      }).then(function(r) {
+        var d = r.data.data || {};
+        ok('/sync/version 带出名册版本号', d.roster_version === global.ROSTER_V, JSON.stringify(d));
+        ok('/sync/version 如实说明本班不是席位', d.is_seat_admin === false, JSON.stringify(d));
+        return http('GET', baseUrl + '/api/sync/version', undefined, seatNode());
+      }).then(function(r) {
+        ok('/sync/version 说清了席位班是自己', r.data.data.is_seat_admin === true,
+          JSON.stringify(r.data.data));
+        // 跨校：B 校压根没认领席位，读不了；写上去也不能串到 A 校名册
+        return http('POST', baseUrl + '/api/sync/roster', {
+          items: [{ user_id: '100101', class_no: '1', net_name: 'spoof', real_name: '冒名者', is_admin: 0, status: 'active' }]
+        }, nodeHeaders(global.B.org_id, 'class-b1', 0, 0));
+      }).then(function(r) {
+        ok('B 校照样能报自己的名册（上行不禁校）', r.status === 200, 'HTTP ' + r.status);
+        return http('GET', baseUrl + '/api/sync/roster', undefined, seatNode());
+      }).then(function(r) {
+        var rows = (r.data && r.data.data && r.data.data.roster) || [];
+        var spoof = rows.filter(function(x) { return x.user_id === '100101' && x.net_name === 'spoof'; });
+        ok('B 校的名册没有串进 A 校（跨校隔离靠 org_id）', spoof.length === 0,
+          JSON.stringify(rows.map(function(x) { return x.net_name; })));
+        return http('GET', baseUrl + '/api/sync/roster', undefined,
+          nodeHeaders(global.B.org_id, 'class-b1', 0, 0));
+      }).then(function(r) {
+        ok('B 校没认领席位就读不了名册（403）', r.status === 403, 'HTTP ' + r.status);
+        return http('POST', baseUrl + '/api/sync/roster', { items: [] },
+          nodeHeaders(global.A.org_id, 'class-nonexistent', 0, 0));
+      }).then(function(r) {
+        // 空名册合法（这个班确实一个学生都没有），但同样只动自己那 0 行
+        ok('空名册被接受且不报错', r.status === 200, 'HTTP ' + r.status + ' ' + JSON.stringify(r.data && r.data.data));
+        return http('GET', baseUrl + '/api/sync/roster', undefined, seatNode());
+      }).then(function(r) {
+        var rows = (r.data && r.data.data && r.data.data.roster) || [];
+        ok('空名册没有清掉别人的行', rows.length === 3, 'rows=' + rows.length);
+        return http('GET', baseUrl + '/api/sync/roster', undefined, {
+          'X-Cluss-Secret': 'not-the-real-secret',
+          'X-Cluss-Org': global.A.org_id,
+          'X-Cluss-Instance': SEAT.instance
+        });
+      }).then(function(r) {
+        // 校级密钥不对，连席位班也读不到名册 —— 名册没有绕开 requireNode
+        ok('密钥不对时读不到名册', r.status === 403, 'HTTP ' + r.status);
+
+        console.log('\n== ⑩ 学生台账 / 额度归零 / 密钥隔离 ==');
         return http('GET', baseUrl + '/api/my/students', undefined, { Authorization: 'Bearer ' + tokenA });
       }).then(function(r) {
         // 这条路由以前从没被验证套件碰过，于是「参数个数不对 → 恒 500」

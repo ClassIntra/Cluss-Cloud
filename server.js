@@ -12,9 +12,11 @@
 // 设备上进行，这里只解决「同时管多个班」的策略同步与积分分配。
 //
 // 线上协议与 Cluss node 模式完全兼容（班级电脑的 .env 一个字不用改）：
-//   GET  /api/sync/version       轮询 分配版本号 + 模型配置版本号
+//   GET  /api/sync/version       轮询 分配版本号 + 模型配置版本号 + 花名册版本号
 //   GET  /api/sync/assignments   按校拉额度分配快照
 //   GET  /api/sync/model-config  拉模型配置快照（整表替换语义）
+//   GET  /api/sync/roster        席位班拉**全校**花名册（跨班充值的可见性来源）
+//   POST /api/sync/roster        各班上行**本班**学生（学号/姓名/班级）
 //   POST /api/sync/usage         上报用量明细
 //   认证：X-Cluss-Org（学校编号）+ X-Cluss-Secret（校级接入密钥）
 //
@@ -216,6 +218,33 @@ execSchema([
   '  api_key TEXT NOT NULL,',
   '  updated_at TEXT NOT NULL',
   ');',
+  // 全校花名册（跨班充值的可见性来源）
+  //
+  // 为什么云端需要它：额度账本（allocations）本来就是**全校**口径，各班都能
+  // 通过 /sync/assignments 拉到；但「有谁可以充」这件事各节点只知道**本班**
+  // —— 于是 18 班班管写入权在手，列表里却没有 8 班学生；8 班看得见自己学生，
+  // 却没有写入权。谁都不能给 8 班充钱，僵局。
+  //
+  // 花名册只补**可见性**，不改任何一条权限：
+  //   · 上行（POST /roster）每个班都能发，只替换自己 instance 的行
+  //   · 下行（GET /roster）只有管理员席位那个班能读
+  //   · 额度仍然只走 /sync/allocations 的席位校验，跨校仍被 owner.org_id 挡死
+  //
+  // 刻意不存金额和用量：那是账本与流水的职责，抄一份进名册就等于两处口径。
+  // 读的时候现场 JOIN allocations 和 usage_log，永远是权威值。
+  'CREATE TABLE IF NOT EXISTS org_roster (',
+  '  org_id TEXT NOT NULL REFERENCES orgs(id),',
+  '  user_id TEXT NOT NULL,',                // 学号
+  "  instance_id TEXT NOT NULL DEFAULT '',", // 上行这个学生的节点（本班 = 谁报上来的）
+  "  class_no TEXT NOT NULL DEFAULT '',",     // 班级号，仅展示用；权威归属仍以学号 YYCCNN 为准
+  "  net_name TEXT NOT NULL DEFAULT '',",
+  "  real_name TEXT NOT NULL DEFAULT '',",
+  '  is_admin INTEGER NOT NULL DEFAULT 0,',
+  "  status TEXT NOT NULL DEFAULT 'active',",
+  '  updated_at TEXT NOT NULL,',
+  '  PRIMARY KEY (org_id, user_id)',
+  ');',
+  'CREATE INDEX IF NOT EXISTS idx_roster_org ON org_roster(org_id, class_no);',
   'CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);',
 'CREATE TABLE IF NOT EXISTS admins (',     // 平台运营者
   '  username TEXT PRIMARY KEY,',
@@ -1322,6 +1351,80 @@ app.post('/api/sync/allocations', requireNode, function(req, res) {
 });
 
 // ------------------------------------------------------------
+// 全校花名册 · 上行：各班发布**本班**学生
+//
+// body: { items: [{ user_id, class_no, net_name, real_name, is_admin, status }] }
+//
+// 语义是「整表替换本 instance 的行」而不是增量：
+//   · 名册在节点侧本来就是全量快照（联动时整班纳入），增量语义会让
+//     「学生转出 / 改名」变成永远删不掉的残留；
+//   · 整表替换天然幂等，教室网络重发不会堆出重复行。
+//
+// 权限：**不设席位闸门**。每个班都必须上报自己的学生，否则席位班永远
+// 看不见他们——而「看不见」正是跨班充不了钱的那个死结。席位闸门只放在
+// 下行（读全校）那一侧：名册是能读全校，额度还是只能席位改。
+// ------------------------------------------------------------
+app.post('/api/sync/roster', requireNode, function(req, res) {
+  var b = req.body || {};
+  var raw = Array.isArray(b.items) ? b.items : [];
+  if (raw.length > 1000) return res.status(400).json({ code: 400, message: '单次最多同步 1000 名学生' });
+
+  var orgId = req.nodeOrg;
+  var inst = req.nodeInstance;
+  if (!inst) return res.status(400).json({ code: 400, message: '缺少实例标识' });
+  var now = nowIso();
+
+  // 归一化成与 SELECT 完全同形、同序的结构，才能直接和旧快照做字符串比对
+  var incoming = [];
+  var seen = Object.create(null);
+  for (var i = 0; i < raw.length; i++) {
+    var it = raw[i] || {};
+    var uid = String(it.user_id || '').trim().slice(0, 40);
+    if (!uid || seen[uid]) continue;   // 空学号 / 重号：留第一条
+    seen[uid] = true;
+    incoming.push({
+      user_id: uid,
+      class_no: String(it.class_no || '').trim().slice(0, 16),
+      net_name: String(it.net_name || '').trim().slice(0, 64),
+      real_name: String(it.real_name || '').trim().slice(0, 64),
+      is_admin: it.is_admin ? 1 : 0,
+      status: (String(it.status || 'active').trim() === 'disabled') ? 'disabled' : 'active'
+    });
+  }
+  incoming.sort(function(a, c) { return a.user_id < c.user_id ? -1 : a.user_id > c.user_id ? 1 : 0; });
+
+  var changed = db.transaction(function() {
+    var before = db.prepare([
+      'SELECT user_id, class_no, net_name, real_name, is_admin, status FROM org_roster',
+      'WHERE org_id = ? AND instance_id = ? ORDER BY user_id'
+    ].join('\n')).all(orgId, inst);
+
+    // 一字不差就不动库、不涨版本：节点每 60s 推一次，名册没变化时席位班
+    // 不该被拉着白拉一遍全校花名册。
+    if (JSON.stringify(before) === JSON.stringify(incoming)) return false;
+
+    db.prepare('DELETE FROM org_roster WHERE org_id = ? AND instance_id = ?').run(orgId, inst);
+    var ins = db.prepare([
+      'INSERT INTO org_roster (org_id, user_id, instance_id, class_no, net_name, real_name, is_admin, status, updated_at)',
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ].join('\n'));
+    incoming.forEach(function(r) {
+      ins.run(orgId, r.user_id, inst, r.class_no, r.net_name, r.real_name, r.is_admin, r.status, now);
+    });
+    bumpOrgVersion(orgId, 'roster');
+    return true;
+  })();
+
+  console.log('[Sync] 花名册上行: 学校 %s / %s 班 %d 人%s（v%s）',
+    orgId, inst, incoming.length, changed ? '（有变化）' : '（无变化）', orgVersion(orgId, 'roster'));
+  res.json({
+    code: 200,
+    message: changed ? '花名册已更新' : '花名册无变化',
+    data: { roster_version: orgVersion(orgId, 'roster'), changed: changed, count: incoming.length }
+  });
+});
+
+// ------------------------------------------------------------
 // 账号绑定 · 第一节：班级节点发起（node 认证，校级密钥）
 //
 // 为什么由节点发起而不是管理员自己在网页上填学号：云端永远不存班级密码，
@@ -1390,6 +1493,7 @@ app.get('/api/sync/version', requireNode, function(req, res) {
       instance_id: INSTANCE_ID,
       assign_version: orgVersion(req.nodeOrg, 'assign'),
       model_config_version: orgVersion(req.nodeOrg, 'model'),
+      roster_version: orgVersion(req.nodeOrg, 'roster'),
       is_seat_admin: !!(seat && seat.instance_id === req.nodeInstance),
       seat_instance: seat ? seat.instance_id : '',
       server_time: nowIso().replace('T', ' ').slice(0, 19)
@@ -1410,6 +1514,56 @@ app.get('/api/sync/assignments', requireNode, function(req, res) {
     data: {
       assign_version: orgVersion(req.nodeOrg, 'assign'),
       assignments: rows
+    }
+  });
+});
+
+// ------------------------------------------------------------
+// 全校花名册 · 下行：只有**管理员席位**那个班能读
+//
+// 这是「18 班能给 8 班充值」缺的那半块拼图：额度账本早就是全校口径，
+// 班管在自己机器上却只查得到本班 users 表 —— 于是手握写入权的人看不见
+// 别班学生，看得见别班学生的人没有写入权。
+//
+// 返回值带每人余额与消耗（现场 JOIN allocations / usage_log），因为本地
+// 镜像里没有外班学生的账（节点只对自己存在的用户落地 cluss_credit）。
+// 名册本身永远不带金额：金额只在账本里有一份。
+//
+// 非席位班调这个一律 403 —— 名册里有全校姓名学号，不是给每个班看的。
+// ------------------------------------------------------------
+app.get('/api/sync/roster', requireNode, function(req, res) {
+  var seat = seatBinding(req.nodeOrg);
+  if (!seat || seat.instance_id !== req.nodeInstance) {
+    return res.status(403).json({
+      code: 403,
+      message: seat
+        ? ('全校花名册只有管理员席位可以读取（本校席位在 ' + seat.instance_id + ' 班）')
+        : '本校还没有认领管理员席位，无法读取全校花名册'
+    });
+  }
+
+  var rows = db.prepare([
+    'SELECT r.user_id, r.instance_id, r.class_no, r.net_name, r.real_name, r.is_admin, r.status,',
+    '       IFNULL(a.allocated_micro, 0) AS allocated_micro,',
+    '       IFNULL(a.weekly_quota_micro, 0) AS weekly_quota_micro,',
+    '       IFNULL(u.used_micro, 0) AS used_micro,',
+    '       IFNULL(u.calls, 0) AS calls,',
+    '       u.last_at',
+    'FROM org_roster r',
+    'LEFT JOIN allocations a ON a.user_id = r.user_id AND a.org_id = r.org_id',
+    'LEFT JOIN (',
+    '  SELECT user_id, SUM(cost_micro) AS used_micro, COUNT(*) AS calls, MAX(created_at) AS last_at',
+    '  FROM usage_log WHERE org_id = ? GROUP BY user_id',
+    ') u ON u.user_id = r.user_id',
+    'WHERE r.org_id = ?',
+    'ORDER BY r.class_no, r.user_id'
+  ].join('\n')).all(req.nodeOrg, req.nodeOrg);
+
+  res.json({
+    code: 200, message: 'ok',
+    data: {
+      roster_version: orgVersion(req.nodeOrg, 'roster'),
+      roster: rows
     }
   });
 });
